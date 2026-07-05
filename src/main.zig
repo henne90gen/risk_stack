@@ -964,6 +964,8 @@ pub fn main(init: std.process.Init) !void {
                 try local_wins.put(result.winning_strategy, current_wins + 1);
             }
 
+            std.debug.print("Writing back results\n", .{});
+
             try ctx.shared.mutex.lock(ctx.io);
             defer ctx.shared.mutex.unlock(ctx.io);
 
@@ -1016,12 +1018,10 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(contexts);
 
     var threaded = std.Io.Threaded.init(allocator, .{
-        .async_limit = .nothing,
+        // .async_limit = .nothing,
     });
     const io = threaded.io();
     defer threaded.deinit();
-
-    std.debug.print("Starting {d} threads\n", .{thread_count});
 
     const start_time = std.Io.Clock.now(.real, io);
 
@@ -1039,10 +1039,6 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try group.await(io);
-
-    // Total cards played:       37418010
-    // Total runtime:            49710ms
-    // Average runtime per game: 4596409ns
 
     const end_time = std.Io.Clock.now(.real, io);
     const overall_runtime = start_time.durationTo(end_time);
