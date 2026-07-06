@@ -40,12 +40,10 @@ const Card = enum(u8) {
 
 const Deck = struct {
     cards: std.ArrayList(Card),
-    prng: std.Random.DefaultPrng,
+    prng: std.Random,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io) !Deck {
+    pub fn init(allocator: std.mem.Allocator, prng: std.Random) !Deck {
         const cards = try std.ArrayList(Card).initCapacity(allocator, 94);
-        const seed = std.Io.Clock.now(.real, io).toMilliseconds();
-        const prng = std.Random.DefaultPrng.init(@intCast(seed));
         var deck = Deck{ .cards = cards, .prng = prng };
         try deck.refill(allocator);
         return deck;
@@ -56,7 +54,7 @@ const Deck = struct {
     }
 
     pub fn shuffle(self: *Deck) void {
-        std.Random.shuffle(self.prng.random(), Card, self.cards.items);
+        std.Random.shuffle(self.prng, Card, self.cards.items);
     }
 
     pub fn refill(self: *Deck, allocator: std.mem.Allocator) !void {
@@ -148,7 +146,10 @@ const Deck = struct {
 
     test "probabilityOfDrawingCard" {
         const allocator = t.allocator;
-        var deck = try Deck.init(allocator, t.io);
+        var r = std.Random.DefaultPrng.init(0);
+        const prng = r.random();
+
+        var deck = try Deck.init(allocator, prng);
         defer deck.deinit(allocator);
 
         try t.expectApproxEqAbs(0.07446808510638298, deck.probabilityOfDrawingCard(.Seven), 0.000001);
@@ -175,26 +176,49 @@ const DrawStrategy = union(enum) {
     },
     Always7,
     Random,
-    RandomMin3Cards,
+    RandomMinCards: u8,
     ChanceOfFailureBelow: f32,
+
+    const Context = struct {
+        pub fn hash(_: Context, s: DrawStrategy) u64 {
+            var hasher = std.hash.Wyhash.init(0);
+            hasher.update(std.mem.asBytes(&std.meta.activeTag(s)));
+            switch (s) {
+                .MinPoints => |v| hasher.update(std.mem.asBytes(&v)),
+                .MaxCards => |v| hasher.update(std.mem.asBytes(&v)),
+                .MinPointsMaxCards => |v| {
+                    hasher.update(std.mem.asBytes(&v.min_points));
+                    hasher.update(std.mem.asBytes(&v.max_cards));
+                },
+                .RandomMinCards => |v| hasher.update(std.mem.asBytes(&v)),
+                .ChanceOfFailureBelow => |v| hasher.update(std.mem.asBytes(&@as(u32, @bitCast(v)))),
+                .Always7, .Random => {},
+            }
+            return hasher.final();
+        }
+        pub fn eql(_: Context, a: DrawStrategy, b: DrawStrategy) bool {
+            if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
+            return switch (a) {
+                .MinPoints => |va| va == b.MinPoints,
+                .MaxCards => |va| va == b.MaxCards,
+                .MinPointsMaxCards => |va| va.min_points == b.MinPointsMaxCards.min_points and va.max_cards == b.MinPointsMaxCards.max_cards,
+                .RandomMinCards => |va| va == b.RandomMinCards,
+                .ChanceOfFailureBelow => |va| @as(u32, @bitCast(va)) == @as(u32, @bitCast(b.ChanceOfFailureBelow)),
+                .Always7, .Random => true,
+            };
+        }
+    };
 };
 
 const Player = struct {
+    prng: std.Random,
     strategy: DrawStrategy,
     hand: std.ArrayList(Card),
-    prng: std.Random.DefaultPrng,
     score: u32 = 0,
     is_still_in_game: bool = true,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, strategy: DrawStrategy) !Player {
-        const hand = try std.ArrayList(Card).initCapacity(allocator, 10);
-        const seed = std.Io.Clock.now(.real, io).toMilliseconds();
-        const prng = std.Random.DefaultPrng.init(@intCast(seed));
-        return Player{
-            .strategy = strategy,
-            .hand = hand,
-            .prng = prng,
-        };
+    pub fn init(allocator: std.mem.Allocator, prng: std.Random, strategy: DrawStrategy) !Player {
+        return Player{ .prng = prng, .strategy = strategy, .hand = try std.ArrayList(Card).initCapacity(allocator, 20) };
     }
 
     pub fn deinit(self: *Player, allocator: std.mem.Allocator) void {
@@ -239,7 +263,10 @@ const Player = struct {
 
     test "handScore" {
         const allocator = t.allocator;
-        var player = try Player.init(allocator, t.io, DrawStrategy.Always7);
+        var r = std.Random.DefaultPrng.init(0);
+        const prng = r.random();
+
+        var player = try Player.init(allocator, prng, DrawStrategy.Always7);
         defer player.deinit(allocator);
 
         try player.hand.append(allocator, .Twelve);
@@ -300,13 +327,13 @@ const Player = struct {
                 return self.hand.items.len < 7;
             },
             .Random => {
-                return self.prng.random().boolean();
+                return self.prng.boolean();
             },
-            .RandomMin3Cards => {
-                if (self.hand.items.len < 3) {
+            .RandomMinCards => |min_cards| {
+                if (self.hand.items.len < min_cards) {
                     return true;
                 }
-                return self.prng.random().boolean();
+                return self.prng.boolean();
             },
             .ChanceOfFailureBelow => |f| {
                 var p_total: f64 = 0.0;
@@ -323,58 +350,67 @@ const Player = struct {
 
     test "decideTakeCard MinPoints = 30 takes cards until hand score 30 is reached" {
         const allocator = t.allocator;
-        var deck = try Deck.init(allocator, t.io);
+        var r = std.Random.DefaultPrng.init(0);
+        const prng = r.random();
+
+        var deck = try Deck.init(allocator, prng);
         defer deck.deinit(allocator);
 
-        var player = try Player.init(allocator, t.io, DrawStrategy{ .MinPoints = 30 });
+        var player = try Player.init(allocator, prng, DrawStrategy{ .MinPoints = 30 });
         defer player.deinit(allocator);
 
         try t.expect(player.decideTakeCard(&deck));
-        _ = try player.takeCard(allocator, .Twelve);
+        _ = player.takeCard(.Twelve);
         try t.expect(player.decideTakeCard(&deck));
-        _ = try player.takeCard(allocator, .Eleven);
+        _ = player.takeCard(.Eleven);
         try t.expect(player.decideTakeCard(&deck));
-        _ = try player.takeCard(allocator, .Ten);
+        _ = player.takeCard(.Ten);
 
         try t.expect(!player.decideTakeCard(&deck));
     }
 
     test "decideTakeCard MaxCards = 3 takes cards until hand contains 3 cards" {
         const allocator = t.allocator;
-        var deck = try Deck.init(allocator, t.io);
+        var r = std.Random.DefaultPrng.init(0);
+        const prng = r.random();
+
+        var deck = try Deck.init(allocator, prng);
         defer deck.deinit(allocator);
 
-        var player = try Player.init(allocator, t.io, DrawStrategy{ .MaxCards = 3 });
+        var player = try Player.init(allocator, prng, DrawStrategy{ .MaxCards = 3 });
         defer player.deinit(allocator);
 
         try t.expect(player.decideTakeCard(&deck));
-        _ = try player.takeCard(allocator, .Twelve);
+        _ = player.takeCard(.Twelve);
         try t.expect(player.decideTakeCard(&deck));
-        _ = try player.takeCard(allocator, .Eleven);
+        _ = player.takeCard(.Eleven);
         try t.expect(player.decideTakeCard(&deck));
-        _ = try player.takeCard(allocator, .Ten);
+        _ = player.takeCard(.Ten);
 
         try t.expect(!player.decideTakeCard(&deck));
 
         player.hand.clearRetainingCapacity();
 
         try t.expect(player.decideTakeCard(&deck));
-        _ = try player.takeCard(allocator, .Zero);
+        _ = player.takeCard(.Zero);
         try t.expect(player.decideTakeCard(&deck));
-        _ = try player.takeCard(allocator, .One);
+        _ = player.takeCard(.One);
         try t.expect(player.decideTakeCard(&deck));
-        _ = try player.takeCard(allocator, .Two);
+        _ = player.takeCard(.Two);
 
         try t.expect(!player.decideTakeCard(&deck));
     }
 
     test "decideTakeCard ChancesOfFailureBelow10Percent" {
         const allocator = t.allocator;
-        var player = try Player.init(allocator, t.io, DrawStrategy{ .ChanceOfFailureBelow = 0.1 });
-        defer player.deinit(allocator);
+        var r = std.Random.DefaultPrng.init(0);
+        const prng = r.random();
 
-        var deck = try Deck.init(allocator, t.io);
+        var deck = try Deck.init(allocator, prng);
         defer deck.deinit(allocator);
+
+        var player = try Player.init(allocator, prng, DrawStrategy{ .ChanceOfFailureBelow = 0.1 });
+        defer player.deinit(allocator);
 
         try deck.removeCard(.Seven);
         try deck.removeCard(.Seven);
@@ -384,8 +420,8 @@ const Player = struct {
         try t.expect(player.decideTakeCard(&deck));
     }
 
-    pub fn takeCard(self: *Player, allocator: std.mem.Allocator, card: Card) !bool {
-        try self.hand.append(allocator, card);
+    pub fn takeCard(self: *Player, card: Card) bool {
+        self.hand.appendAssumeCapacity(card);
 
         // check if any card is duplicated
         for (0..self.hand.items.len - 1) |i| {
@@ -416,56 +452,65 @@ const Player = struct {
 
     test "takeCard fails on duplicate card" {
         const allocator = t.allocator;
-        var player = try Player.init(allocator, t.io, DrawStrategy.Always7);
+        var r = std.Random.DefaultPrng.init(0);
+        const prng = r.random();
+
+        var player = try Player.init(allocator, prng, DrawStrategy.Always7);
         defer player.deinit(allocator);
 
-        try t.expect(!try player.takeCard(allocator, .Twelve));
+        try t.expect(!player.takeCard(.Twelve));
         try t.expect(player.is_still_in_game);
-        try t.expect(!try player.takeCard(allocator, .Twelve));
+        try t.expect(!player.takeCard(.Twelve));
         try t.expect(!player.is_still_in_game);
     }
 
     test "takeCard ends round at 7 cards" {
         const allocator = t.allocator;
-        var player = try Player.init(allocator, t.io, DrawStrategy.Always7);
+        var r = std.Random.DefaultPrng.init(0);
+        const prng = r.random();
+
+        var player = try Player.init(allocator, prng, DrawStrategy.Always7);
         defer player.deinit(allocator);
 
-        try t.expect(!try player.takeCard(allocator, .Zero));
+        try t.expect(!player.takeCard(.Zero));
         try t.expect(player.is_still_in_game);
-        try t.expect(!try player.takeCard(allocator, .One));
+        try t.expect(!player.takeCard(.One));
         try t.expect(player.is_still_in_game);
-        try t.expect(!try player.takeCard(allocator, .Two));
+        try t.expect(!player.takeCard(.Two));
         try t.expect(player.is_still_in_game);
-        try t.expect(!try player.takeCard(allocator, .Three));
+        try t.expect(!player.takeCard(.Three));
         try t.expect(player.is_still_in_game);
-        try t.expect(!try player.takeCard(allocator, .Four));
+        try t.expect(!player.takeCard(.Four));
         try t.expect(player.is_still_in_game);
-        try t.expect(!try player.takeCard(allocator, .Five));
+        try t.expect(!player.takeCard(.Five));
         try t.expect(player.is_still_in_game);
-        try t.expect(try player.takeCard(allocator, .Six));
+        try t.expect(player.takeCard(.Six));
         try t.expect(player.is_still_in_game);
     }
 
     test "takeCard does not end round if 7th card is a not a number card" {
         const allocator = t.allocator;
-        var player = try Player.init(allocator, t.io, DrawStrategy.Always7);
+        var r = std.Random.DefaultPrng.init(0);
+        const prng = r.random();
+
+        var player = try Player.init(allocator, prng, DrawStrategy.Always7);
         defer player.deinit(allocator);
 
-        try t.expect(!try player.takeCard(allocator, .Zero));
-        try t.expect(!try player.takeCard(allocator, .One));
-        try t.expect(!try player.takeCard(allocator, .Two));
-        try t.expect(!try player.takeCard(allocator, .Three));
-        try t.expect(!try player.takeCard(allocator, .Four));
-        try t.expect(!try player.takeCard(allocator, .Five));
-        try t.expect(!try player.takeCard(allocator, .PlusTwo));
-        try t.expect(!try player.takeCard(allocator, .PlusFour));
-        try t.expect(!try player.takeCard(allocator, .PlusSix));
-        try t.expect(!try player.takeCard(allocator, .PlusEight));
-        try t.expect(!try player.takeCard(allocator, .PlusTen));
-        try t.expect(!try player.takeCard(allocator, .SecondChance));
+        try t.expect(!player.takeCard(.Zero));
+        try t.expect(!player.takeCard(.One));
+        try t.expect(!player.takeCard(.Two));
+        try t.expect(!player.takeCard(.Three));
+        try t.expect(!player.takeCard(.Four));
+        try t.expect(!player.takeCard(.Five));
+        try t.expect(!player.takeCard(.PlusTwo));
+        try t.expect(!player.takeCard(.PlusFour));
+        try t.expect(!player.takeCard(.PlusSix));
+        try t.expect(!player.takeCard(.PlusEight));
+        try t.expect(!player.takeCard(.PlusTen));
+        try t.expect(!player.takeCard(.SecondChance));
     }
 
-    pub fn hasCard(self: *Player, card: Card) !bool {
+    pub fn hasCard(self: *Player, card: Card) bool {
         for (self.hand.items) |c| {
             if (c == card) {
                 return true;
@@ -485,52 +530,28 @@ const Player = struct {
     }
 };
 
-const DrawStrategyContext = struct {
-    pub fn hash(_: DrawStrategyContext, s: DrawStrategy) u64 {
-        var hasher = std.hash.Wyhash.init(0);
-        hasher.update(std.mem.asBytes(&std.meta.activeTag(s)));
-        switch (s) {
-            .MinPoints => |v| hasher.update(std.mem.asBytes(&v)),
-            .MaxCards => |v| hasher.update(std.mem.asBytes(&v)),
-            .MinPointsMaxCards => |v| {
-                hasher.update(std.mem.asBytes(&v.min_points));
-                hasher.update(std.mem.asBytes(&v.max_cards));
-            },
-            .ChanceOfFailureBelow => |v| hasher.update(std.mem.asBytes(&@as(u32, @bitCast(v)))),
-            else => {},
-        }
-        return hasher.final();
-    }
-    pub fn eql(_: DrawStrategyContext, a: DrawStrategy, b: DrawStrategy) bool {
-        if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
-        return switch (a) {
-            .MinPoints => |va| va == b.MinPoints,
-            .MaxCards => |va| va == b.MaxCards,
-            .MinPointsMaxCards => |va| va.min_points == b.MinPointsMaxCards.min_points and va.max_cards == b.MinPointsMaxCards.max_cards,
-            .ChanceOfFailureBelow => |va| @as(u32, @bitCast(va)) == @as(u32, @bitCast(b.ChanceOfFailureBelow)),
-            else => true,
-        };
-    }
-};
-
 const GameSimulation = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    prng: std.Random.DefaultPrng,
+    prng: std.Random,
     deck: *Deck,
     players: []Player,
+    player_selection_buffer: []*Player,
     cards_played: u32 = 0,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, deck: *Deck, players: []Player) GameSimulation {
-        const seed = std.Io.Clock.now(.real, io).toMilliseconds();
-        const prng = std.Random.DefaultPrng.init(@intCast(seed));
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, prng: std.Random, deck: *Deck, players: []Player) !GameSimulation {
         return GameSimulation{
             .allocator = allocator,
             .io = io,
             .prng = prng,
             .deck = deck,
             .players = players,
+            .player_selection_buffer = try allocator.alloc(*Player, players.len),
         };
+    }
+
+    pub fn deinit(self: *GameSimulation, allocator: std.mem.Allocator) void {
+        allocator.free(self.player_selection_buffer);
     }
 
     pub fn simulateGame(self: *GameSimulation) !GameResult {
@@ -593,7 +614,7 @@ const GameSimulation = struct {
             self.cards_played += 1;
             switch (card) {
                 .Freeze => {
-                    try self.handleFreeze(player);
+                    self.handleFreeze(player);
                     continue;
                 },
                 .FlipThree => {
@@ -601,8 +622,8 @@ const GameSimulation = struct {
                     continue;
                 },
                 .SecondChance => {
-                    if (!try player.hasCard(card)) {
-                        _ = try player.takeCard(self.allocator, card);
+                    if (!player.hasCard(card)) {
+                        _ = player.takeCard(card);
                         continue;
                     }
 
@@ -616,18 +637,18 @@ const GameSimulation = struct {
                             continue;
                         }
 
-                        if (try other_player.hasCard(card)) {
+                        if (other_player.hasCard(card)) {
                             continue;
                         }
 
-                        _ = try other_player.takeCard(self.allocator, card);
+                        _ = other_player.takeCard(card);
                         break;
                     }
 
                     continue;
                 },
                 else => {
-                    if (try player.takeCard(self.allocator, card)) {
+                    if (player.takeCard(card)) {
                         for (self.players) |*p| {
                             p.nextRound();
                         }
@@ -637,11 +658,9 @@ const GameSimulation = struct {
         }
     }
 
-    fn handleFreeze(self: *GameSimulation, player: *Player) !void {
+    fn handleFreeze(self: *GameSimulation, player: *Player) void {
         // TODO make this a configurable strategy, doing it randomly for now
-        var available_players = try std.ArrayList(*Player).initCapacity(self.allocator, self.players.len);
-        defer available_players.deinit(self.allocator);
-
+        var available_players = std.ArrayList(*Player).initBuffer(self.player_selection_buffer);
         for (self.players) |*p| {
             if (p == player) {
                 continue;
@@ -649,7 +668,7 @@ const GameSimulation = struct {
             if (!p.is_still_in_game) {
                 continue;
             }
-            try available_players.append(self.allocator, p);
+            available_players.appendAssumeCapacity(p);
         }
 
         if (available_players.items.len == 0) {
@@ -657,7 +676,7 @@ const GameSimulation = struct {
             return;
         }
 
-        const random_index = self.prng.random().intRangeLessThan(usize, 0, available_players.items.len);
+        const random_index = self.prng.intRangeLessThan(usize, 0, available_players.items.len);
         var freeze_target = &self.players[random_index];
         freeze_target.endRound();
     }
@@ -683,7 +702,7 @@ const GameSimulation = struct {
                 continue;
             }
 
-            const round_over = try player.takeCard(self.allocator, drawn);
+            const round_over = player.takeCard(drawn);
             if (round_over or !player.is_still_in_game) {
                 should_resolve_action_cards = false;
                 break;
@@ -695,16 +714,14 @@ const GameSimulation = struct {
                 try self.handleFlipThree(player);
             }
             for (0..freeze_count) |_| {
-                try self.handleFreeze(player);
+                self.handleFreeze(player);
             }
         }
     }
 
     fn handleFlipThree(self: *GameSimulation, player: *Player) !void {
         // TODO make this a configurable strategy, doing it randomly for now
-        var available_players = try std.ArrayList(*Player).initCapacity(self.allocator, self.players.len);
-        defer available_players.deinit(self.allocator);
-
+        var available_players = std.ArrayList(*Player).initBuffer(self.player_selection_buffer);
         for (self.players) |*p| {
             if (p == player) {
                 continue;
@@ -712,7 +729,7 @@ const GameSimulation = struct {
             if (!p.is_still_in_game) {
                 continue;
             }
-            try available_players.append(self.allocator, p);
+            available_players.appendAssumeCapacity(p);
         }
 
         if (available_players.items.len == 0) {
@@ -721,20 +738,22 @@ const GameSimulation = struct {
             return;
         }
 
-        const random_index = self.prng.random().intRangeLessThan(usize, 0, available_players.items.len);
+        const random_index = self.prng.intRangeLessThan(usize, 0, available_players.items.len);
         const flip_three_target = available_players.items[random_index];
         try self.drawThreeCards(flip_three_target);
     }
 
     test "handleFlipThree simple case" {
         const allocator = t.allocator;
+        var r = std.Random.DefaultPrng.init(0);
+        const prng = r.random();
 
-        var deck = try Deck.init(allocator, t.io);
+        var deck = try Deck.init(allocator, prng);
         defer deck.deinit(allocator);
 
         var players = [_]Player{
-            try .init(allocator, t.io, .Random),
-            try .init(allocator, t.io, .Random),
+            try .init(allocator, prng, .Random),
+            try .init(allocator, prng, .Random),
         };
         defer {
             for (&players) |*player| {
@@ -746,7 +765,8 @@ const GameSimulation = struct {
         try deck.cards.append(allocator, .Two);
         try deck.cards.append(allocator, .Three);
 
-        var simulation = GameSimulation.init(allocator, t.io, &deck, &players);
+        var simulation = try GameSimulation.init(allocator, t.io, prng, &deck, &players);
+        defer simulation.deinit(allocator);
 
         const drawing_player = &players[0];
         try simulation.handleFlipThree(drawing_player);
@@ -761,13 +781,15 @@ const GameSimulation = struct {
 
     test "handleFlipThree flip three as last drawn card" {
         const allocator = t.allocator;
+        var r = std.Random.DefaultPrng.init(0);
+        const prng = r.random();
 
-        var deck = try Deck.init(allocator, t.io);
+        var deck = try Deck.init(allocator, prng);
         defer deck.deinit(allocator);
 
         var players = [_]Player{
-            try .init(allocator, t.io, .Random),
-            try .init(allocator, t.io, .Random),
+            try .init(allocator, prng, .Random),
+            try .init(allocator, prng, .Random),
         };
         defer {
             for (&players) |*player| {
@@ -782,7 +804,8 @@ const GameSimulation = struct {
         try deck.cards.append(allocator, .Four);
         try deck.cards.append(allocator, .Five);
 
-        var simulation = GameSimulation.init(allocator, t.io, &deck, &players);
+        var simulation = try GameSimulation.init(allocator, t.io, prng, &deck, &players);
+        defer simulation.deinit(allocator);
 
         const drawing_player = &players[0];
         try simulation.handleFlipThree(drawing_player);
@@ -802,13 +825,15 @@ const GameSimulation = struct {
 
     test "handleFlipThree flip three as first and second drawn card" {
         const allocator = t.allocator;
+        var r = std.Random.DefaultPrng.init(0);
+        const prng = r.random();
 
-        var deck = try Deck.init(allocator, t.io);
+        var deck = try Deck.init(allocator, prng);
         defer deck.deinit(allocator);
 
         var players = [_]Player{
-            try .init(allocator, t.io, .Random),
-            try .init(allocator, t.io, .Random),
+            try .init(allocator, prng, .Random),
+            try .init(allocator, prng, .Random),
         };
         defer {
             for (&players) |*player| {
@@ -826,7 +851,8 @@ const GameSimulation = struct {
         try deck.cards.append(allocator, .FlipThree);
         try deck.cards.append(allocator, .FlipThree);
 
-        var simulation = GameSimulation.init(allocator, t.io, &deck, &players);
+        var simulation = try GameSimulation.init(allocator, t.io, prng, &deck, &players);
+        defer simulation.deinit(allocator);
 
         const drawing_player = &players[0];
         try simulation.handleFlipThree(drawing_player);
@@ -848,13 +874,15 @@ const GameSimulation = struct {
 
     test "handleFlipThree freeze as last card" {
         const allocator = t.allocator;
+        var r = std.Random.DefaultPrng.init(0);
+        const prng = r.random();
 
-        var deck = try Deck.init(allocator, t.io);
+        var deck = try Deck.init(allocator, prng);
         defer deck.deinit(allocator);
 
         var players = [_]Player{
-            try .init(allocator, t.io, .Random),
-            try .init(allocator, t.io, .Random),
+            try .init(allocator, prng, .Random),
+            try .init(allocator, prng, .Random),
         };
         defer {
             for (&players) |*player| {
@@ -866,7 +894,8 @@ const GameSimulation = struct {
         try deck.cards.append(allocator, .One);
         try deck.cards.append(allocator, .Two);
 
-        var simulation = GameSimulation.init(allocator, t.io, &deck, &players);
+        var simulation = try GameSimulation.init(allocator, t.io, prng, &deck, &players);
+        defer simulation.deinit(allocator);
 
         const drawing_player = &players[0];
         try simulation.handleFlipThree(drawing_player);
@@ -882,13 +911,15 @@ const GameSimulation = struct {
 
     test "handleFlipThree freeze as first and second card" {
         const allocator = t.allocator;
+        var r = std.Random.DefaultPrng.init(0);
+        const prng = r.random();
 
-        var deck = try Deck.init(allocator, t.io);
+        var deck = try Deck.init(allocator, prng);
         defer deck.deinit(allocator);
 
         var players = [_]Player{
-            try .init(allocator, t.io, .Random),
-            try .init(allocator, t.io, .Random),
+            try .init(allocator, prng, .Random),
+            try .init(allocator, prng, .Random),
         };
         defer {
             for (&players) |*player| {
@@ -900,7 +931,8 @@ const GameSimulation = struct {
         try deck.cards.append(allocator, .Freeze);
         try deck.cards.append(allocator, .Freeze);
 
-        var simulation = GameSimulation.init(allocator, t.io, &deck, &players);
+        var simulation = try GameSimulation.init(allocator, t.io, prng, &deck, &players);
+        defer simulation.deinit(allocator);
 
         const drawing_player = &players[0];
         try simulation.handleFlipThree(drawing_player);
@@ -929,10 +961,10 @@ pub fn main(init: std.process.Init) !void {
         mutex: std.Io.Mutex = .init,
         total_cards_played: u64 = 0,
         total_runtime: std.Io.Duration = std.Io.Duration.fromSeconds(0),
-        draw_strategy_wins: std.HashMap(DrawStrategy, u32, DrawStrategyContext, std.hash_map.default_max_load_percentage),
+        draw_strategy_wins: std.HashMap(DrawStrategy, u32, DrawStrategy.Context, std.hash_map.default_max_load_percentage),
     };
     var shared = SharedResults{
-        .draw_strategy_wins = std.HashMap(DrawStrategy, u32, DrawStrategyContext, std.hash_map.default_max_load_percentage).init(allocator),
+        .draw_strategy_wins = std.HashMap(DrawStrategy, u32, DrawStrategy.Context, std.hash_map.default_max_load_percentage).init(allocator),
     };
     defer shared.draw_strategy_wins.deinit();
 
@@ -941,6 +973,7 @@ pub fn main(init: std.process.Init) !void {
         io: std.Io,
         games: u32,
         shared: *SharedResults,
+        prng: std.Random.DefaultPrng,
 
         fn run(ctx: *@This()) void {
             ctx.runAll() catch |err| {
@@ -951,20 +984,18 @@ pub fn main(init: std.process.Init) !void {
         fn runAll(ctx: *@This()) !void {
             var local_cards_played: u64 = 0;
             var local_runtime: std.Io.Duration = .fromSeconds(0);
-            var local_wins = std.HashMap(DrawStrategy, u32, DrawStrategyContext, std.hash_map.default_max_load_percentage).init(ctx.allocator);
+            var local_wins = std.HashMap(DrawStrategy, u32, DrawStrategy.Context, std.hash_map.default_max_load_percentage).init(ctx.allocator);
             defer local_wins.deinit();
 
             std.debug.print("Simulating {d} games\n", .{ctx.games});
 
             for (0..ctx.games) |_| {
-                const result = try runGame(ctx.allocator, ctx.io);
+                const result = try runGame(ctx.allocator, ctx.io, ctx.prng.random());
                 local_cards_played += result.cards_played;
                 local_runtime = .fromNanoseconds(local_runtime.nanoseconds + result.runtime.nanoseconds);
                 const current_wins = local_wins.get(result.winning_strategy) orelse 0;
                 try local_wins.put(result.winning_strategy, current_wins + 1);
             }
-
-            std.debug.print("Writing back results\n", .{});
 
             try ctx.shared.mutex.lock(ctx.io);
             defer ctx.shared.mutex.unlock(ctx.io);
@@ -978,33 +1009,46 @@ pub fn main(init: std.process.Init) !void {
             }
         }
 
-        fn runGame(task_allocator: std.mem.Allocator, io: std.Io) !GameResult {
-            var deck = try Deck.init(task_allocator, io);
-            defer deck.deinit(task_allocator);
+        fn runGame(task_allocator: std.mem.Allocator, io: std.Io, prng: std.Random) !GameResult {
+            var arena = std.heap.ArenaAllocator.init(task_allocator);
+            defer arena.deinit();
+            const arena_allocator = arena.allocator();
+
+            var deck = try Deck.init(arena_allocator, prng);
+            defer deck.deinit(arena_allocator);
 
             var players = [_]Player{
-                try .init(task_allocator, io, DrawStrategy{ .MinPoints = 20 }),
-                try .init(task_allocator, io, DrawStrategy{ .MinPoints = 30 }),
-                try .init(task_allocator, io, DrawStrategy{ .MinPoints = 40 }),
-                try .init(task_allocator, io, DrawStrategy{ .MaxCards = 3 }),
-                try .init(task_allocator, io, DrawStrategy{ .MaxCards = 4 }),
-                try .init(task_allocator, io, DrawStrategy{ .MaxCards = 5 }),
-                try .init(task_allocator, io, DrawStrategy{ .MinPointsMaxCards = .{ .min_points = 30, .max_cards = 5 } }),
-                try .init(task_allocator, io, .Always7),
-                try .init(task_allocator, io, .Random),
-                try .init(task_allocator, io, .RandomMin3Cards),
-                try .init(task_allocator, io, DrawStrategy{ .ChanceOfFailureBelow = 0.1 }),
-                try .init(task_allocator, io, DrawStrategy{ .ChanceOfFailureBelow = 0.2 }),
-                try .init(task_allocator, io, DrawStrategy{ .ChanceOfFailureBelow = 0.3 }),
-                try .init(task_allocator, io, DrawStrategy{ .ChanceOfFailureBelow = 0.4 }),
+                try .init(arena_allocator, prng, .{ .MinPoints = 20 }),
+                try .init(arena_allocator, prng, .{ .MinPoints = 30 }),
+                try .init(arena_allocator, prng, .{ .MinPoints = 40 }),
+                try .init(arena_allocator, prng, .{ .MaxCards = 3 }),
+                try .init(arena_allocator, prng, .{ .MaxCards = 4 }),
+                try .init(arena_allocator, prng, .{ .MaxCards = 5 }),
+                try .init(arena_allocator, prng, .{ .MinPointsMaxCards = .{ .min_points = 30, .max_cards = 5 } }),
+                try .init(arena_allocator, prng, .{ .MinPointsMaxCards = .{ .min_points = 30, .max_cards = 4 } }),
+                try .init(arena_allocator, prng, .{ .MinPointsMaxCards = .{ .min_points = 30, .max_cards = 3 } }),
+                try .init(arena_allocator, prng, .{ .MinPointsMaxCards = .{ .min_points = 20, .max_cards = 5 } }),
+                try .init(arena_allocator, prng, .{ .MinPointsMaxCards = .{ .min_points = 20, .max_cards = 4 } }),
+                try .init(arena_allocator, prng, .{ .MinPointsMaxCards = .{ .min_points = 20, .max_cards = 3 } }),
+                try .init(arena_allocator, prng, .Always7),
+                try .init(arena_allocator, prng, .Random),
+                try .init(arena_allocator, prng, .{ .RandomMinCards = 1 }),
+                try .init(arena_allocator, prng, .{ .RandomMinCards = 2 }),
+                try .init(arena_allocator, prng, .{ .RandomMinCards = 3 }),
+                try .init(arena_allocator, prng, .{ .RandomMinCards = 4 }),
+                try .init(arena_allocator, prng, .{ .ChanceOfFailureBelow = 0.1 }),
+                try .init(arena_allocator, prng, .{ .ChanceOfFailureBelow = 0.2 }),
+                try .init(arena_allocator, prng, .{ .ChanceOfFailureBelow = 0.3 }),
+                try .init(arena_allocator, prng, .{ .ChanceOfFailureBelow = 0.4 }),
             };
             defer {
                 for (&players) |*player| {
-                    player.deinit(task_allocator);
+                    player.deinit(arena_allocator);
                 }
             }
 
-            var simulation = GameSimulation.init(task_allocator, io, &deck, &players);
+            var simulation = try GameSimulation.init(arena_allocator, io, prng, &deck, &players);
+            defer simulation.deinit(arena_allocator);
             return simulation.simulateGame();
         }
     };
@@ -1034,6 +1078,7 @@ pub fn main(init: std.process.Init) !void {
             .io = io,
             .games = @intCast(games_per_thread + extra),
             .shared = &shared,
+            .prng = std.Random.DefaultPrng.init(@intCast(std.Io.Clock.now(.real, io).toMilliseconds() +% @as(i64, @intCast(i)))),
         };
         group.async(io, WorkerContext.run, .{&contexts[i]});
     }
@@ -1067,6 +1112,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }.lessThan);
     for (entries.items) |entry| {
-        std.debug.print("{d:4} times won Strategy {}\n", .{ entry.wins, entry.strategy });
+        const pct = @as(f64, @floatFromInt(entry.wins)) / @as(f64, games_to_run) * 100.0;
+        std.debug.print("{d:5} times won ({d:5.2}%) Strategy {}\n", .{ entry.wins, pct, entry.strategy });
     }
 }
