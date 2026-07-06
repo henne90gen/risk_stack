@@ -427,6 +427,12 @@ const Player = struct {
         for (0..self.hand.items.len - 1) |i| {
             // always comparing to the last card, since that's the one that was just added
             if (self.hand.items[i] == self.hand.items[self.hand.items.len - 1]) {
+                // Remove the duplicate card that was just added
+                _ = self.hand.pop();
+                // SecondChance saves the player: remove the SecondChance instead of eliminating
+                if (self.removeCard(.SecondChance)) {
+                    return false;
+                }
                 self.is_still_in_game = false;
                 return false;
             }
@@ -462,6 +468,46 @@ const Player = struct {
         try t.expect(player.is_still_in_game);
         try t.expect(!player.takeCard(.Twelve));
         try t.expect(!player.is_still_in_game);
+    }
+
+    test "takeCard with SecondChance survives duplicate" {
+        const allocator = t.allocator;
+        var r = std.Random.DefaultPrng.init(0);
+        const prng = r.random();
+
+        var player = try Player.init(allocator, prng, DrawStrategy.Always7);
+        defer player.deinit(allocator);
+
+        try t.expect(!player.takeCard(.SecondChance));
+        try t.expect(player.is_still_in_game);
+        try t.expect(!player.takeCard(.Twelve));
+        try t.expect(player.is_still_in_game);
+        // duplicate Twelve: SecondChance is consumed, player survives
+        try t.expect(!player.takeCard(.Twelve));
+        try t.expect(player.is_still_in_game);
+        try t.expect(!player.hasCard(.SecondChance));
+        try t.expectEqual(1, player.hand.items.len); // only the first Twelve remains
+        // now a second duplicate eliminates the player (no SecondChance left)
+        try t.expect(!player.takeCard(.Twelve));
+        try t.expect(!player.is_still_in_game);
+    }
+
+    test "takeCard SecondChance itself cannot be duplicated" {
+        const allocator = t.allocator;
+        var r = std.Random.DefaultPrng.init(0);
+        const prng = r.random();
+
+        var player = try Player.init(allocator, prng, DrawStrategy.Always7);
+        defer player.deinit(allocator);
+
+        // Player draws a SecondChance normally
+        try t.expect(!player.takeCard(.SecondChance));
+        try t.expect(player.is_still_in_game);
+        // Drawing a second SecondChance triggers the duplicate check; the existing
+        // SecondChance in hand is consumed to save the player.
+        try t.expect(!player.takeCard(.SecondChance));
+        try t.expect(player.is_still_in_game);
+        try t.expect(!player.hasCard(.SecondChance));
     }
 
     test "takeCard ends round at 7 cards" {
@@ -513,6 +559,18 @@ const Player = struct {
     pub fn hasCard(self: *Player, card: Card) bool {
         for (self.hand.items) |c| {
             if (c == card) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Removes the first occurrence of `card` from the player's hand.
+    /// Returns true if the card was found and removed, false otherwise.
+    pub fn removeCard(self: *Player, card: Card) bool {
+        for (self.hand.items, 0..) |c, i| {
+            if (c == card) {
+                _ = self.hand.orderedRemove(i);
                 return true;
             }
         }
@@ -622,29 +680,7 @@ const GameSimulation = struct {
                     continue;
                 },
                 .SecondChance => {
-                    if (!player.hasCard(card)) {
-                        _ = player.takeCard(card);
-                        continue;
-                    }
-
-                    // Give this card to another player who doesn't already have it; if no-one can take it, discard it
-                    for (self.players) |*other_player| {
-                        if (other_player == player) {
-                            continue;
-                        }
-
-                        if (!other_player.is_still_in_game) {
-                            continue;
-                        }
-
-                        if (other_player.hasCard(card)) {
-                            continue;
-                        }
-
-                        _ = other_player.takeCard(card);
-                        break;
-                    }
-
+                    try self.handleSecondChance(player, card);
                     continue;
                 },
                 else => {
@@ -656,6 +692,30 @@ const GameSimulation = struct {
                 },
             }
         }
+    }
+
+    fn handleSecondChance(self: *GameSimulation, player: *Player, card: Card) error{OutOfMemory}!void {
+        if (!player.hasCard(card)) {
+            _ = player.takeCard(card);
+            return;
+        }
+
+        // Player already has a SecondChance: give it to a random other eligible player.
+        var available_players = std.ArrayList(*Player).initBuffer(self.player_selection_buffer);
+        for (self.players) |*other_player| {
+            if (other_player == player) continue;
+            if (!other_player.is_still_in_game) continue;
+            if (other_player.hasCard(card)) continue;
+            available_players.appendAssumeCapacity(other_player);
+        }
+
+        if (available_players.items.len == 0) {
+            // No eligible recipient: discard.
+            return;
+        }
+
+        const random_index = self.prng.intRangeLessThan(usize, 0, available_players.items.len);
+        _ = available_players.items[random_index].takeCard(card);
     }
 
     fn handleFreeze(self: *GameSimulation, player: *Player) void {
@@ -699,6 +759,10 @@ const GameSimulation = struct {
             }
             if (drawn == .FlipThree) {
                 flip_three_count += 1;
+                continue;
+            }
+            if (drawn == .SecondChance) {
+                try self.handleSecondChance(player, drawn);
                 continue;
             }
 
