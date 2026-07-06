@@ -597,6 +597,11 @@ const GameSimulation = struct {
     player_selection_buffer: []*Player,
     cards_played: u32 = 0,
 
+    start_time: ?std.Io.Timestamp = null,
+    current_player_index: u32 = 0,
+
+    result_: ?GameResult = null,
+
     pub fn init(allocator: std.mem.Allocator, io: std.Io, prng: std.Random, deck: *Deck, players: []Player) !GameSimulation {
         return GameSimulation{
             .allocator = allocator,
@@ -612,86 +617,99 @@ const GameSimulation = struct {
         allocator.free(self.player_selection_buffer);
     }
 
-    pub fn simulateGame(self: *GameSimulation) !GameResult {
-        const start_time = std.Io.Clock.now(.real, self.io);
+    pub fn step(self: *GameSimulation) !bool {
+        if (self.start_time == null) {
+            // first call to step -> initializing
+            self.start_time = std.Io.Clock.now(.real, self.io);
 
-        self.deck.shuffle();
+            self.deck.shuffle();
+            self.current_player_index = @intCast(self.players.len);
+        }
 
-        var current_player_index: u32 = @intCast(self.players.len);
-        while (true) {
-            var winning_player: ?Player = null;
-            for (self.players) |player| {
-                if (player.score >= 200) {
-                    winning_player = player;
-                    break;
-                }
-            }
-            if (winning_player) |player| {
-                const end_time = std.Io.Clock.now(.real, self.io);
-                const runtime = start_time.durationTo(end_time);
-                return GameResult{
-                    .winning_strategy = player.strategy,
-                    .cards_played = self.cards_played,
-                    .runtime = runtime,
-                };
-            }
+        if (self.result_ != null) {
+            // game simulation is already finished
+            return false;
+        }
 
-            var all_players_eliminated = true;
-            for (self.players) |p| {
-                if (p.is_still_in_game) {
-                    all_players_eliminated = false;
-                    break;
-                }
-            }
-            if (all_players_eliminated) {
-                for (self.players) |*p| {
-                    p.nextRound();
-                }
-            }
-
-            current_player_index += 1;
-            if (current_player_index >= self.players.len) {
-                current_player_index = 0;
-            }
-
-            if (self.deck.cards.items.len == 0) {
-                try self.deck.refill(self.allocator);
-                self.deck.shuffle();
-            }
-
-            var player = &self.players[current_player_index];
-            if (!player.is_still_in_game) {
-                continue;
-            }
-
-            if (!player.decideTakeCard(self.deck)) {
-                player.endRound();
-            }
-
-            const card = self.deck.cards.pop().?;
-            self.cards_played += 1;
-            switch (card) {
-                .Freeze => {
-                    self.handleFreeze(player);
-                    continue;
-                },
-                .FlipThree => {
-                    try self.handleFlipThree(player);
-                    continue;
-                },
-                .SecondChance => {
-                    try self.handleSecondChance(player, card);
-                    continue;
-                },
-                else => {
-                    if (player.takeCard(card)) {
-                        for (self.players) |*p| {
-                            p.nextRound();
-                        }
-                    }
-                },
+        var winning_player: ?Player = null;
+        for (self.players) |player| {
+            if (player.score >= 200) {
+                winning_player = player;
+                break;
             }
         }
+        if (winning_player) |player| {
+            const end_time = std.Io.Clock.now(.real, self.io);
+            const runtime = self.start_time.?.durationTo(end_time);
+            self.result_ = GameResult{
+                .winning_strategy = player.strategy,
+                .cards_played = self.cards_played,
+                .runtime = runtime,
+            };
+            return false;
+        }
+
+        var all_players_eliminated = true;
+        for (self.players) |p| {
+            if (p.is_still_in_game) {
+                all_players_eliminated = false;
+                break;
+            }
+        }
+        if (all_players_eliminated) {
+            for (self.players) |*p| {
+                p.nextRound();
+            }
+        }
+
+        self.current_player_index += 1;
+        if (self.current_player_index >= self.players.len) {
+            self.current_player_index = 0;
+        }
+
+        if (self.deck.cards.items.len == 0) {
+            try self.deck.refill(self.allocator);
+            self.deck.shuffle();
+        }
+
+        var player = &self.players[self.current_player_index];
+        if (!player.is_still_in_game) {
+            return true;
+        }
+
+        if (!player.decideTakeCard(self.deck)) {
+            player.endRound();
+        }
+
+        const card = self.deck.cards.pop().?;
+        self.cards_played += 1;
+        switch (card) {
+            .Freeze => {
+                self.handleFreeze(player);
+                return true;
+            },
+            .FlipThree => {
+                try self.handleFlipThree(player);
+                return true;
+            },
+            .SecondChance => {
+                try self.handleSecondChance(player, card);
+                return true;
+            },
+            else => {
+                if (player.takeCard(card)) {
+                    for (self.players) |*p| {
+                        p.nextRound();
+                    }
+                }
+            },
+        }
+
+        return true;
+    }
+
+    pub fn result(self: *GameSimulation) GameResult {
+        return self.result_.?;
     }
 
     fn handleSecondChance(self: *GameSimulation, player: *Player, card: Card) error{OutOfMemory}!void {
@@ -1085,6 +1103,7 @@ pub fn main(init: std.process.Init) !void {
                 try .init(arena_allocator, prng, .{ .MinPoints = 20 }),
                 try .init(arena_allocator, prng, .{ .MinPoints = 30 }),
                 try .init(arena_allocator, prng, .{ .MinPoints = 40 }),
+                try .init(arena_allocator, prng, .{ .MinPoints = 50 }),
                 try .init(arena_allocator, prng, .{ .MaxCards = 3 }),
                 try .init(arena_allocator, prng, .{ .MaxCards = 4 }),
                 try .init(arena_allocator, prng, .{ .MaxCards = 5 }),
@@ -1113,7 +1132,9 @@ pub fn main(init: std.process.Init) !void {
 
             var simulation = try GameSimulation.init(arena_allocator, io, prng, &deck, &players);
             defer simulation.deinit(arena_allocator);
-            return simulation.simulateGame();
+
+            while (try simulation.step()) {}
+            return simulation.result();
         }
     };
 
