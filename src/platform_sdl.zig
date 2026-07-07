@@ -1,8 +1,8 @@
 // platform_sdl.zig — native SDL3 backend.  Never imported on wasm builds.
 
 const std = @import("std");
-const gl = @import("gl");
-const keys = @import("keys");
+const gl = @import("gl.zig");
+const keys = @import("keys.zig");
 
 const c = @cImport({
     @cInclude("SDL3/SDL.h");
