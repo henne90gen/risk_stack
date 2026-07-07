@@ -315,7 +315,13 @@ const Player = struct {
                 return self.handScore() < min_points;
             },
             .MaxCards => |max_cards| {
-                return self.hand.items.len < max_cards;
+                var number_card_count: u32 = 0;
+                for (self.hand.items)|c| {
+                    if (c.isNumber()) {
+                        number_card_count += 1;
+                    }
+                }
+                return number_card_count < max_cards;
             },
             .MinPointsMaxCards => |data| {
                 if (self.handScore() < data.min_points) {
