@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Flip7</title>
+        <style>
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+            html,
+            body {
+                width: 100%;
+                height: 100%;
+                background: #000;
+                overflow: hidden;
+            }
+            canvas {
+                display: block;
+                width: 100%;
+                height: 100%;
+                /* Pixel-perfect rendering — no browser smoothing */
+                image-rendering: pixelated;
+            }
+        </style>
+    </head>
+    <body>
+        <canvas id="canvas"></canvas>
+
+        <script src="webgl.js"></script>
+        <script>
+            let wasmMemory = null; // set once the instance is created
+            (async () => {
+                // -------------------------------------------------------------------------
+                // Memory helpers (Wasm <-> JS string / buffer access)
+                // -------------------------------------------------------------------------
+
+                function getString(ptr, len) {
+                    const array = new Uint8Array(wasmMemory.buffer, ptr, len);
+                    const decoder = new TextDecoder();
+                    return decoder.decode(array);
+                }
+
+                const canvas = document.getElementById("canvas");
+                const webgl = initWebGL(canvas, getString);
+                const env = {
+                    // -- Debug logging ------------------------------------------------------
+                    jsLog(ptr, len) {
+                        console.log(getString(ptr, len));
+                    },
+
+                    ...webgl,
+                };
+
+                // -------------------------------------------------------------------------
+                // Load and instantiate the Wasm module
+                // -------------------------------------------------------------------------
+
+                const response = await fetch("flip7.wasm");
+                const { instance } = await WebAssembly.instantiateStreaming(
+                    response,
+                    { env },
+                );
+                wasmMemory = instance.exports.memory;
+
+                const { onInit, onResize, onKeyDown, onAnimationFrame } =
+                    instance.exports;
+
+                // -------------------------------------------------------------------------
+                // Canvas sizing — call onResize whenever the canvas changes physical pixels
+                // -------------------------------------------------------------------------
+
+                function resize() {
+                    const dpr = window.devicePixelRatio || 1;
+                    const w = canvas.clientWidth;
+                    const h = canvas.clientHeight;
+                    const pw = Math.round(w * dpr);
+                    const ph = Math.round(h * dpr);
+                    if (canvas.width !== pw || canvas.height !== ph) {
+                        canvas.width = pw;
+                        canvas.height = ph;
+                        onResize(w, h, dpr);
+                    }
+                }
+
+                // -------------------------------------------------------------------------
+                // Keyboard — key codes match keys.zig constants (JS keyCode values)
+                // -------------------------------------------------------------------------
+
+                window.addEventListener("keydown", (e) => {
+                    onKeyDown(e.keyCode);
+                });
+
+                // -------------------------------------------------------------------------
+                // Init and run loop
+                // -------------------------------------------------------------------------
+
+                // Force an initial resize so onResize/glViewport is called
+                // even when clientWidth/clientHeight haven't changed yet.
+                {
+                    const dpr = window.devicePixelRatio || 1;
+                    const w = canvas.clientWidth;
+                    const h = canvas.clientHeight;
+                    canvas.width = Math.round(w * dpr);
+                    canvas.height = Math.round(h * dpr);
+                    onResize(w, h, dpr);
+                }
+                onInit();
+
+                new ResizeObserver(resize).observe(canvas);
+
+                function frame() {
+                    resize();
+                    onAnimationFrame();
+                    requestAnimationFrame(frame);
+                }
+                requestAnimationFrame(frame);
+            })();
+        </script>
+    </body>
+</html>

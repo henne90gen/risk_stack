@@ -10,6 +10,7 @@
 // native builds.  On wasm the call is a no-op.
 
 const builtin = @import("builtin");
+const std = @import("std");
 const is_wasm = builtin.target.cpu.arch == .wasm32;
 
 // ---------------------------------------------------------------------------
@@ -20,7 +21,7 @@ pub const GL_DEPTH_TEST: u32 = 0x0B71;
 pub const GL_VERTEX_SHADER: u32 = 0x8B31;
 pub const GL_FRAGMENT_SHADER: u32 = 0x8B30;
 pub const GL_ARRAY_BUFFER: u32 = 0x8892;
-pub const GL_STATIC_DRAW: u32 = 0x88B4;
+pub const GL_STATIC_DRAW: u32 = 0x88E4;
 pub const GL_FLOAT: u32 = 0x1406;
 pub const GL_FALSE: u32 = 0;
 pub const GL_TRUE: u32 = 1;
@@ -62,23 +63,16 @@ const wasm = if (is_wasm) struct {
     extern fn glDeleteProgram(program: u32) void;
     extern fn glDeleteBuffers(n: i32, buffers: [*]const u32) void;
 
-    // VAOs are not exposed in the WebGL1 host; provide no-ops so shared code
-    // that calls these on native compiles cleanly on wasm too.
-    fn glGenVertexArrays(n: i32, arrays: [*]u32) void {
-        _ = n;
-        _ = arrays;
-    }
-    fn glBindVertexArray(array: u32) void {
-        _ = array;
-    }
-    fn glDeleteVertexArrays(n: i32, arrays: [*]const u32) void {
-        _ = n;
-        _ = arrays;
-    }
+    extern fn glGenVertexArrays(n: i32, arrays: [*]u32) void;
+    extern fn glBindVertexArray(array: u32) void;
+    extern fn glDeleteVertexArrays(n: i32, arrays: [*]const u32) void;
 
     // High-level wasm helpers used by the existing wasm entrypoint.
     extern fn glInitShader(src: [*]const u8, len: usize, typ: u32) u32;
     extern fn glLinkShaderProgram(vert: u32, frag: u32) u32;
+
+    // Debug logging — calls console.log on the JS side.
+    extern fn jsLog(ptr: [*]const u8, len: usize) void;
 } else struct {};
 
 // ---------------------------------------------------------------------------
@@ -333,4 +327,22 @@ pub fn glLinkShaderProgram(vert: u32, frag: u32) u32 {
     glDeleteShader(vert);
     glDeleteShader(frag);
     return prog;
+}
+
+/// Write a string to the browser console (wasm) or stdout (native).
+pub fn log(msg: []const u8) void {
+    if (is_wasm) {
+        wasm.jsLog(msg.ptr, msg.len);
+    } else {
+        const stdout = std.io.getStdOut().writer();
+        stdout.print("{s}\n", .{msg}) catch {};
+    }
+}
+
+/// Format and log — accepts a comptime format string and args, same as std.fmt.bufPrint.
+/// Uses a fixed 512-byte stack buffer; messages longer than that are truncated.
+pub fn logFmt(comptime fmt: []const u8, args: anytype) void {
+    var buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch buf[0..];
+    log(msg);
 }

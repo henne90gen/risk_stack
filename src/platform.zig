@@ -62,8 +62,6 @@ pub fn run(comptime App: type) void {
     validateApp(App);
 
     if (is_wasm) {
-        // Declare the four export symbols the JS host will call.
-        // Wrapping in a struct forces Zig to emit them.
         const Exports = struct {
             export fn onInit() void {
                 App.onInit();
@@ -80,9 +78,7 @@ pub fn run(comptime App: type) void {
         };
         _ = Exports;
     } else {
-        // Imported as a named module (declared in build.zig for native only),
-        // so the wasm build never resolves this file.
-        const sdl = @import("platform_sdl");
+        const sdl = @import("platform_sdl.zig");
         sdl.run(App);
     }
 }
