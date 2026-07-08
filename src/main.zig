@@ -50,9 +50,9 @@ var tri_vbo: u32 = 0;
 
 pub const TriangleApp = struct {
     pub fn onInit() void {
-        const vert = gl.glInitShader(vert_src, vert_src.len, gl.GL_VERTEX_SHADER);
-        const frag = gl.glInitShader(frag_src, frag_src.len, gl.GL_FRAGMENT_SHADER);
-        tri_program = gl.glLinkShaderProgram(vert, frag);
+        const vert = glInitShader(vert_src, vert_src.len, gl.GL_VERTEX_SHADER);
+        const frag = glInitShader(frag_src, frag_src.len, gl.GL_FRAGMENT_SHADER);
+        tri_program = glLinkShaderProgram(vert, frag);
         gl.glGenVertexArrays(1, @as([*]u32, @ptrCast(&tri_vao)));
         gl.glGenBuffers(1, @as([*]u32, @ptrCast(&tri_vbo)));
 
@@ -94,3 +94,22 @@ pub const TriangleApp = struct {
         gl.glBindVertexArray(0);
     }
 };
+
+pub fn glInitShader(src: [*:0]const u8, len: usize, typ: u32) u32 {
+    // if (is_wasm) return wasm.glInitShader(src, len, typ);
+    const shader = gl.glCreateShader(typ);
+    gl.glShaderSource(shader, src, @intCast(len));
+    gl.glCompileShader(shader);
+    return shader;
+}
+
+pub fn glLinkShaderProgram(vert: u32, frag: u32) u32 {
+    // if (is_wasm) return wasm.glLinkShaderProgram(vert, frag);
+    const prog = gl.glCreateProgram();
+    gl.glAttachShader(prog, vert);
+    gl.glAttachShader(prog, frag);
+    gl.glLinkProgram(prog);
+    gl.glDeleteShader(vert);
+    gl.glDeleteShader(frag);
+    return prog;
+}

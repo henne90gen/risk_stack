@@ -46,35 +46,13 @@ function initWebGL(canvas, getString) {
     throw new Error("The browser supports WebGL, but initialization failed.");
   }
 
-  const glShaders = [];
-  const glPrograms = [];
-  const glVertexArrays = [null]; // index 0 = unbound sentinel
-  const glBuffers = [null];     // index 0 = unbound sentinel
-  const glTextures = [];
-  const glUniformLocations = [];
-
-  const glInitShader = (sourcePtr, sourceLen, type) => {
-    const source = getString(sourcePtr, sourceLen);
-    const shader = gl.createShader(type);
-    gl.shaderSource(shader, source);
-    gl.compileShader(shader);
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-      throw "Error compiling shader:" + gl.getShaderInfoLog(shader);
-    }
-    glShaders.push(shader);
-    return glShaders.length - 1;
-  };
-  const glLinkShaderProgram = (vertexShaderId, fragmentShaderId) => {
-    const program = gl.createProgram();
-    gl.attachShader(program, glShaders[vertexShaderId]);
-    gl.attachShader(program, glShaders[fragmentShaderId]);
-    gl.linkProgram(program);
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-      throw "Error linking program:" + gl.getProgramInfoLog(program);
-    }
-    glPrograms.push(program);
-    return glPrograms.length - 1;
-  };
+  // NOTE index 0 = unbound sentinel
+  const glShaders = [null];
+  const glPrograms = [null];
+  const glVertexArrays = [null];
+  const glBuffers = [null];
+  const glTextures = [null];
+  const glUniformLocations = [null];
 
   function createGLTexture(ctx, image, texture) {
     ctx.enable(ctx.TEXTURE_2D);
@@ -145,6 +123,32 @@ function initWebGL(canvas, getString) {
       buffers[n] = b;
     }
   };
+  const glCreateProgram = () => {
+    glPrograms.push(gl.createProgram());
+    return glPrograms.length - 1;
+  };
+  const glAttachShader = (programId, shaderId) => {
+    gl.attachShader(glPrograms[programId], glShaders[shaderId]);
+  };
+  const glLinkProgram = (programId) => {
+    gl.linkProgram(glPrograms[programId]);
+    if (!gl.getProgramParameter(glPrograms[programId], gl.LINK_STATUS)) {
+      throw (
+        "Error linking program:" + gl.getProgramInfoLog(glPrograms[programId])
+      );
+    }
+  };
+  const glCreateShader = (type) => {
+    glShaders.push(gl.createShader(type));
+    return glShaders.length - 1;
+  };
+  const glShaderSource = (shaderId, sourcePtr, sourceLen) => {
+    const source = getString(sourcePtr, sourceLen);
+    gl.shaderSource(glShaders[shaderId], source);
+  };
+  const glCompileShader = (shaderId) => {
+    gl.compileShader(glShaders[shaderId]);
+  };
   const glDetachShader = (program, shader) => {
     gl.detachShader(glPrograms[program], glShaders[shader]);
   };
@@ -208,7 +212,7 @@ function initWebGL(canvas, getString) {
   const glDeleteTextures = (num, dataPtr) => {
     const textures = new Uint32Array(wasmMemory.buffer, dataPtr, num);
     for (let n = 0; n < num; n++) {
-      gl.glCreateTexture(buffers[n]);
+      gl.glCreateTexture(glBuffers[n]);
       glTextures[textures[n]] = undefined;
     }
   };
@@ -269,9 +273,13 @@ function initWebGL(canvas, getString) {
   const glGetError = () => gl.getError();
 
   return {
-    glInitShader,
-    glLinkShaderProgram,
+    glCreateProgram,
+    glAttachShader,
+    glLinkProgram,
     glDeleteProgram,
+    glCreateShader,
+    glShaderSource,
+    glCompileShader,
     glDetachShader,
     glDeleteShader,
     glViewport,

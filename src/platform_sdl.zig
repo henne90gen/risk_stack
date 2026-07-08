@@ -94,7 +94,7 @@ pub fn run(comptime App: type) void {
             switch (event.type) {
                 c.SDL_EVENT_QUIT => break :main,
 
-                c.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED => {
+                c.SDL_EVENT_WINDOW_RESIZED, c.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED => {
                     const we = event.window;
                     var lw: c_int = 0;
                     var _lh: c_int = 0;

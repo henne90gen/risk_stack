@@ -90,7 +90,6 @@ pub fn build(b: *std.Build) void {
         const wasm_step = b.step("wasm", "Build WebGL module (wasm32-wasi)");
         wasm_step.dependOn(&install_wasm.step);
 
-        // Copy web resources so zig-out/ can serve as the web root.
         const install_html = b.addInstallBinFile(b.path("static/index.html"), "index.html");
         const install_js = b.addInstallBinFile(b.path("static/webgl.js"), "webgl.js");
         wasm_step.dependOn(&install_html.step);

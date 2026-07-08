@@ -55,7 +55,6 @@ const wasm = if (is_wasm) struct {
     extern fn glAttachShader(program: u32, shader: u32) void;
     extern fn glLinkProgram(program: u32) void;
     extern fn glUseProgram(program: u32) void;
-    // glGetUniformLocation on wasm: JS host needs (program, name_ptr, name_len).
     extern fn glGetUniformLocation(program: u32, name: [*]const u8, len: i32) i32;
     extern fn glUniform4f(loc: i32, x: f32, y: f32, z: f32, w: f32) void;
     extern fn glUniformMatrix4fv(loc: i32, count: i32, transpose: u32, data: [*]const f32) void;
@@ -208,8 +207,6 @@ pub fn glVertexAttribPointer(index: u32, size: i32, typ: u32, normalized: u32, s
     }
 }
 
-// VAOs — real on native, no-ops on wasm.
-
 pub fn glGenVertexArrays(n: i32, arrays: [*]u32) void {
     if (is_wasm) wasm.glGenVertexArrays(n, arrays) else gl_procs.GenVertexArrays(@intCast(n), @ptrCast(arrays));
 }
@@ -222,18 +219,14 @@ pub fn glDeleteVertexArrays(n: i32, arrays: [*]const u32) void {
     if (is_wasm) wasm.glDeleteVertexArrays(n, arrays) else gl_procs.DeleteVertexArrays(@intCast(n), @ptrCast(arrays));
 }
 
-// Shaders
-
 pub fn glCreateShader(typ: u32) u32 {
     if (is_wasm) return wasm.glCreateShader(typ) else return @intCast(gl_procs.CreateShader(@intCast(typ)));
 }
 
 /// Simplified single-string shader source upload.
 /// On native wraps the standard (shader, count, strings, lengths) signature.
-/// The caller must ensure `src[0..len]` is the complete source; on native the
-/// pointer is also expected to be null-terminated (use @embedFile or a string
-/// literal).
-pub fn glShaderSource(shader: u32, src: [*]const u8, len: i32) void {
+/// The caller must ensure `src[0..len]` is the complete source.
+pub fn glShaderSource(shader: u32, src: [*:0]const u8, len: i32) void {
     if (is_wasm) {
         wasm.glShaderSource(shader, src, len);
     } else {
@@ -262,16 +255,10 @@ pub fn glUseProgram(program: u32) void {
     if (is_wasm) wasm.glUseProgram(program) else gl_procs.UseProgram(@intCast(program));
 }
 
-/// Uniform location lookup.
-/// `len` is used on wasm (the JS host needs the name length); on native it is
-/// ignored and the name pointer must be null-terminated.
-pub fn glGetUniformLocation(program: u32, name: [*]const u8, name_len: i32) i32 {
+pub fn glGetUniformLocation(program: u32, name: [*:0]const u8) i32 {
     if (is_wasm) {
-        return wasm.glGetUniformLocation(program, name, name_len);
+        return wasm.glGetUniformLocation(program, name, name.len);
     } else {
-        // name_len is wasm-only; native GL requires a null-terminated string.
-        const _unused = name_len;
-        _ = _unused;
         return @intCast(gl_procs.GetUniformLocation(@intCast(program), @ptrCast(name)));
     }
 }
@@ -303,31 +290,6 @@ pub fn glDeleteBuffers(n: i32, buffers: [*]const u32) void {
 // ---------------------------------------------------------------------------
 // Wasm-only helpers (backward compat with existing wasm entrypoint)
 // ---------------------------------------------------------------------------
-
-/// Create, upload source for, and compile a shader in one call.
-/// Only available on wasm — the JS host implements this as a convenience.
-/// Native callers should use glCreateShader / glShaderSource / glCompileShader.
-pub fn glInitShader(src: [*]const u8, len: usize, typ: u32) u32 {
-    if (is_wasm) return wasm.glInitShader(src, len, typ);
-    // On native, delegate to the three-step path.
-    const shader = glCreateShader(typ);
-    glShaderSource(shader, src, @intCast(len));
-    glCompileShader(shader);
-    return shader;
-}
-
-/// Attach two shader objects to a new program and link it.
-/// Available on both targets for compatibility with existing wasm entrypoint code.
-pub fn glLinkShaderProgram(vert: u32, frag: u32) u32 {
-    if (is_wasm) return wasm.glLinkShaderProgram(vert, frag);
-    const prog = glCreateProgram();
-    glAttachShader(prog, vert);
-    glAttachShader(prog, frag);
-    glLinkProgram(prog);
-    glDeleteShader(vert);
-    glDeleteShader(frag);
-    return prog;
-}
 
 /// Write a string to the browser console (wasm) or stdout (native).
 pub fn log(msg: []const u8) void {
