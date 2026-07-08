@@ -46,9 +46,14 @@
                 const canvas = document.getElementById("canvas");
                 const webgl = initWebGL(canvas, getString);
                 const env = {
-                    // -- Debug logging ------------------------------------------------------
-                    jsLog(ptr, len) {
+                    logInfo(ptr, len) {
                         console.log(getString(ptr, len));
+                    },
+                    logWarn(ptr, len) {
+                        console.warn(getString(ptr, len));
+                    },
+                    logErr(ptr, len) {
+                        console.error(getString(ptr, len));
                     },
 
                     ...webgl,
@@ -65,12 +70,16 @@
                 );
                 wasmMemory = instance.exports.memory;
 
-                const { onInit, onResize, onKeyDown, onAnimationFrame } =
-                    instance.exports;
-
-                // -------------------------------------------------------------------------
-                // Canvas sizing — call onResize whenever the canvas changes physical pixels
-                // -------------------------------------------------------------------------
+                const {
+                    onInit,
+                    onResize,
+                    onKeyDown,
+                    onKeyUp,
+                    onMouseDown,
+                    onMouseUp,
+                    onMouseMove,
+                    onAnimationFrame,
+                } = instance.exports;
 
                 function resize() {
                     const dpr = window.devicePixelRatio || 1;
@@ -85,12 +94,20 @@
                     }
                 }
 
-                // -------------------------------------------------------------------------
-                // Keyboard — key codes match keys.zig constants (JS keyCode values)
-                // -------------------------------------------------------------------------
-
                 window.addEventListener("keydown", (e) => {
                     onKeyDown(e.keyCode);
+                });
+                window.addEventListener("keyup", (e) => {
+                    onKeyUp(e.keyCode);
+                });
+                canvas.addEventListener("mousedown", (e) => {
+                    onMouseDown(e.button, e.clientX, e.clientY);
+                });
+                canvas.addEventListener("mouseup", (e) => {
+                    onMouseUp(e.button, e.clientX, e.clientY);
+                });
+                canvas.addEventListener("mousemove", (e) => {
+                    onMouseMove(e.clientX, e.clientY);
                 });
 
                 // -------------------------------------------------------------------------

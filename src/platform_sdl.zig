@@ -1,8 +1,5 @@
-// platform_sdl.zig — native SDL3 backend.  Never imported on wasm builds.
-
 const std = @import("std");
-const gl = @import("gl.zig");
-const keys = @import("keys.zig");
+const p = @import("platform.zig");
 
 const c = @cImport({
     @cInclude("SDL3/SDL.h");
@@ -16,17 +13,17 @@ const c = @cImport({
 const ScanEntry = struct { sdl: c_uint, js: c_uint };
 
 const scancode_map = [_]ScanEntry{
-    .{ .sdl = 80, .js = keys.KEY_LEFT },
-    .{ .sdl = 79, .js = keys.KEY_RIGHT },
-    .{ .sdl = 82, .js = keys.KEY_UP },
-    .{ .sdl = 81, .js = keys.KEY_DOWN },
-    .{ .sdl = 44, .js = keys.KEY_SPACE },
-    .{ .sdl = 40, .js = keys.KEY_ENTER },
-    .{ .sdl = 41, .js = keys.KEY_ESCAPE },
-    .{ .sdl = 4, .js = keys.KEY_A },
-    .{ .sdl = 7, .js = keys.KEY_D },
-    .{ .sdl = 22, .js = keys.KEY_S },
-    .{ .sdl = 26, .js = keys.KEY_W },
+    .{ .sdl = 80, .js = p.KEY_LEFT },
+    .{ .sdl = 79, .js = p.KEY_RIGHT },
+    .{ .sdl = 82, .js = p.KEY_UP },
+    .{ .sdl = 81, .js = p.KEY_DOWN },
+    .{ .sdl = 44, .js = p.KEY_SPACE },
+    .{ .sdl = 40, .js = p.KEY_ENTER },
+    .{ .sdl = 41, .js = p.KEY_ESCAPE },
+    .{ .sdl = 4, .js = p.KEY_A },
+    .{ .sdl = 7, .js = p.KEY_D },
+    .{ .sdl = 22, .js = p.KEY_S },
+    .{ .sdl = 26, .js = p.KEY_W },
 };
 
 fn sdlScancodeToJs(scancode: c_uint) ?c_uint {
@@ -42,7 +39,7 @@ fn sdlScancodeToJs(scancode: c_uint) ?c_uint {
 
 pub fn run(comptime App: type) void {
     if (!c.SDL_Init(c.SDL_INIT_VIDEO)) {
-        std.log.err("SDL_Init failed: {s}", .{c.SDL_GetError()});
+        p.logErr("SDL_Init failed: {s}", .{c.SDL_GetError()});
         return;
     }
     defer c.SDL_Quit();
@@ -73,7 +70,7 @@ pub fn run(comptime App: type) void {
     _ = c.SDL_GL_MakeCurrent(window, gl_ctx);
     _ = c.SDL_GL_SetSwapInterval(1);
 
-    gl.loadProcs();
+    p.loadProcs();
 
     App.onInit();
 
@@ -110,6 +107,8 @@ pub fn run(comptime App: type) void {
                     const scancode: c_uint = @intCast(event.key.scancode);
                     if (sdlScancodeToJs(scancode)) |js_key| {
                         App.onKeyDown(js_key);
+                    } else {
+                        p.logWarn("Unmapped SDL scancode: {d}", .{scancode});
                     }
                 },
 

@@ -3,39 +3,14 @@ const Io = std.Io;
 const t = std.testing;
 const flip7 = @import("flip7.zig");
 
-const platform = @import("platform");
-const gl = @import("gl.zig");
+const p = @import("platform.zig");
 
 test {
     t.refAllDecls(@This());
 }
 
-// ---------------------------------------------------------------------------
-// Triangle app — runs on both native (SDL3/OpenGL) and wasm (WebGL).
-// GPU state lives at file scope because App callbacks are plain functions.
-// ---------------------------------------------------------------------------
-
-const vert_src =
-    \\#version 300 es
-    \\precision mediump float;
-    \\layout (location = 0) in vec2 aPos;
-    \\layout (location = 1) in vec3 aColor;
-    \\out vec3 vColor;
-    \\void main() {
-    \\    gl_Position = vec4(aPos, 0.0, 1.0);
-    \\    vColor = aColor;
-    \\}
-;
-
-const frag_src =
-    \\#version 300 es
-    \\precision mediump float;
-    \\in vec3 vColor;
-    \\out vec4 fragColor;
-    \\void main() {
-    \\    fragColor = vec4(vColor, 1.0);
-    \\}
-;
+const vert_src = @embedFile("shader.vert");
+const frag_src = @embedFile("shader.frag");
 
 // interleaved: x, y, r, g, b  (f32)
 const triangle_vertices = [_]f32{
@@ -50,66 +25,80 @@ var tri_vbo: u32 = 0;
 
 pub const TriangleApp = struct {
     pub fn onInit() void {
-        const vert = glInitShader(vert_src, vert_src.len, gl.GL_VERTEX_SHADER);
-        const frag = glInitShader(frag_src, frag_src.len, gl.GL_FRAGMENT_SHADER);
+        const vert = glInitShader(vert_src, vert_src.len, p.GL_VERTEX_SHADER);
+        const frag = glInitShader(frag_src, frag_src.len, p.GL_FRAGMENT_SHADER);
         tri_program = glLinkShaderProgram(vert, frag);
-        gl.glGenVertexArrays(1, @as([*]u32, @ptrCast(&tri_vao)));
-        gl.glGenBuffers(1, @as([*]u32, @ptrCast(&tri_vbo)));
+        p.glGenVertexArrays(1, @as([*]u32, @ptrCast(&tri_vao)));
+        p.glGenBuffers(1, @as([*]u32, @ptrCast(&tri_vbo)));
 
-        gl.glBindVertexArray(tri_vao);
-        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, tri_vbo);
+        p.glBindVertexArray(tri_vao);
+        p.glBindBuffer(p.GL_ARRAY_BUFFER, tri_vbo);
 
         const byte_size = @sizeOf(@TypeOf(triangle_vertices));
-        gl.glBufferData(
-            gl.GL_ARRAY_BUFFER,
+        p.glBufferData(
+            p.GL_ARRAY_BUFFER,
             byte_size,
             &triangle_vertices,
-            gl.GL_STATIC_DRAW,
+            p.GL_STATIC_DRAW,
         );
 
         const stride: i32 = 5 * @sizeOf(f32);
-        gl.glEnableVertexAttribArray(0);
-        gl.glVertexAttribPointer(0, 2, gl.GL_FLOAT, gl.GL_FALSE, stride, @ptrFromInt(0));
-        gl.glEnableVertexAttribArray(1);
-        gl.glVertexAttribPointer(1, 3, gl.GL_FLOAT, gl.GL_FALSE, stride, @ptrFromInt(2 * @sizeOf(f32)));
+        p.glEnableVertexAttribArray(0);
+        p.glVertexAttribPointer(0, 2, p.GL_FLOAT, p.GL_FALSE, stride, @ptrFromInt(0));
+        p.glEnableVertexAttribArray(1);
+        p.glVertexAttribPointer(1, 3, p.GL_FLOAT, p.GL_FALSE, stride, @ptrFromInt(2 * @sizeOf(f32)));
 
-        gl.glBindVertexArray(0);
+        p.glBindVertexArray(0);
     }
 
     pub fn onResize(w: c_uint, h: c_uint, scale: f32) void {
-        gl.glViewport(0, 0, @intFromFloat(scale * @as(f32, @floatFromInt(w))), @intFromFloat(scale * @as(f32, @floatFromInt(h))));
+        p.glViewport(0, 0, @intFromFloat(scale * @as(f32, @floatFromInt(w))), @intFromFloat(scale * @as(f32, @floatFromInt(h))));
     }
 
     pub fn onKeyDown(key: c_uint) void {
-        _ = key;
+        p.logInfo("onKeyDown: {}", .{key});
+    }
+
+    pub fn onKeyUp(key: c_uint) void {
+        p.logInfo("onKeyUp: {}", .{key});
+    }
+
+    pub fn onMouseDown(button: c_uint, x: f32, y: f32) void {
+        p.logInfo("onMouseDown: {} -> {} | {}", .{ button, x, y });
+    }
+
+    pub fn onMouseUp(button: c_uint, x: f32, y: f32) void {
+        p.logInfo("onMouseUp: {} -> {} | {}", .{ button, x, y });
+    }
+
+    pub fn onMouseMove(x: f32, y: f32) void {
+        p.logInfo("onMouseMove: {} | {}", .{ x, y });
     }
 
     pub fn onAnimationFrame() void {
-        gl.glClearColor(0.1, 0.1, 0.1, 1.0);
-        gl.glClear(gl.GL_COLOR_BUFFER_BIT);
+        p.glClearColor(0.1, 0.1, 0.1, 1.0);
+        p.glClear(p.GL_COLOR_BUFFER_BIT);
 
-        gl.glUseProgram(tri_program);
-        gl.glBindVertexArray(tri_vao);
-        gl.glDrawArrays(gl.GL_TRIANGLES, 0, 3);
-        gl.glBindVertexArray(0);
+        p.glUseProgram(tri_program);
+        p.glBindVertexArray(tri_vao);
+        p.glDrawArrays(p.GL_TRIANGLES, 0, 3);
+        p.glBindVertexArray(0);
     }
 };
 
 pub fn glInitShader(src: [*:0]const u8, len: usize, typ: u32) u32 {
-    // if (is_wasm) return wasm.glInitShader(src, len, typ);
-    const shader = gl.glCreateShader(typ);
-    gl.glShaderSource(shader, src, @intCast(len));
-    gl.glCompileShader(shader);
+    const shader = p.glCreateShader(typ);
+    p.glShaderSource(shader, src, @intCast(len));
+    p.glCompileShader(shader);
     return shader;
 }
 
 pub fn glLinkShaderProgram(vert: u32, frag: u32) u32 {
-    // if (is_wasm) return wasm.glLinkShaderProgram(vert, frag);
-    const prog = gl.glCreateProgram();
-    gl.glAttachShader(prog, vert);
-    gl.glAttachShader(prog, frag);
-    gl.glLinkProgram(prog);
-    gl.glDeleteShader(vert);
-    gl.glDeleteShader(frag);
+    const prog = p.glCreateProgram();
+    p.glAttachShader(prog, vert);
+    p.glAttachShader(prog, frag);
+    p.glLinkProgram(prog);
+    p.glDeleteShader(vert);
+    p.glDeleteShader(frag);
     return prog;
 }

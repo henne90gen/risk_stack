@@ -1,3 +1,5 @@
+const std = @import("std");
+
 const platform = @import("platform.zig");
 const TriangleApp = @import("main.zig").TriangleApp;
 
