@@ -11,20 +11,26 @@ pub const is_wasm = builtin.target.cpu.arch == .wasm32;
 // Values match JS KeyboardEvent.keyCode so the wasm host can pass raw JS
 // keycodes straight through to Zig without any translation layer.
 
-pub const KEY_BACKSPACE: c_uint = 8;
-pub const KEY_ENTER: c_uint = 13;
-pub const KEY_ESCAPE: c_uint = 27;
-pub const KEY_SPACE: c_uint = 32;
+pub const Key = enum(u8) {
+    Backspace = 8,
+    Enter = 13,
+    Escape = 27,
+    Space = 32,
+    Left = 37,
+    Up = 38,
+    Right = 39,
+    Down = 40,
+    A = 65,
+    D = 68,
+    S = 83,
+    W = 87,
+};
 
-pub const KEY_LEFT: c_uint = 37;
-pub const KEY_UP: c_uint = 38;
-pub const KEY_RIGHT: c_uint = 39;
-pub const KEY_DOWN: c_uint = 40;
-
-pub const KEY_A: c_uint = 65;
-pub const KEY_D: c_uint = 68;
-pub const KEY_S: c_uint = 83;
-pub const KEY_W: c_uint = 87;
+pub const MouseButton = enum(u8) {
+    Left = 0,
+    Middle = 1,
+    Right = 2,
+};
 
 // ---------------------------------------------------------------------------
 // GL constants
@@ -43,6 +49,22 @@ pub const GL_COLOR_BUFFER_BIT: u32 = 0x4000;
 pub const GL_DEPTH_BUFFER_BIT: u32 = 0x0100;
 pub const GL_COMPILE_STATUS: u32 = 0x8B81;
 pub const GL_LINK_STATUS: u32 = 0x8B82;
+pub const GL_TEXTURE_2D: u32 = 0x0DE1;
+pub const GL_TEXTURE0: u32 = 0x84C0;
+pub const GL_RGBA: u32 = 0x1908;
+pub const GL_UNSIGNED_BYTE: u32 = 0x1401;
+pub const GL_TEXTURE_MIN_FILTER: u32 = 0x2801;
+pub const GL_TEXTURE_MAG_FILTER: u32 = 0x2800;
+pub const GL_TEXTURE_WRAP_S: u32 = 0x2802;
+pub const GL_TEXTURE_WRAP_T: u32 = 0x2803;
+pub const GL_LINEAR_MIPMAP_LINEAR: u32 = 0x2703;
+pub const GL_LINEAR: u32 = 0x2601;
+pub const GL_CLAMP_TO_EDGE: u32 = 0x812F;
+
+/// GLSL version directive appropriate for this target.
+/// Native uses desktop GLSL 3.30; wasm (WebGL 2) uses GLSL ES 3.00.
+pub const glsl_version: []const u8 =
+    if (is_wasm) "#version 300 es\n" else "#version 330 core\n";
 
 // ---------------------------------------------------------------------------
 // WASM path — every symbol is imported from the JS host
@@ -76,10 +98,29 @@ const wasm = if (is_wasm) struct {
     extern fn glGenVertexArrays(n: i32, arrays: [*]u32) void;
     extern fn glBindVertexArray(array: u32) void;
     extern fn glDeleteVertexArrays(n: i32, arrays: [*]const u32) void;
+    extern fn glUniform1i(loc: i32, v: i32) void;
+    extern fn glGenTextures(n: i32, textures: [*]u32) void;
+    extern fn glBindTexture(target: u32, texture: u32) void;
+    extern fn glTexImage2D(target: u32, level: i32, internal_format: i32, width: i32, height: i32, border: i32, format: u32, typ: u32, data: ?*const anyopaque, data_len: usize) void;
+    extern fn glTexParameteri(target: u32, pname: u32, param: i32) void;
+    extern fn glGenerateMipmap(target: u32) void;
 
     extern fn logInfo(ptr: [*]const u8, len: usize) void;
     extern fn logWarn(ptr: [*]const u8, len: usize) void;
     extern fn logErr(ptr: [*]const u8, len: usize) void;
+
+    /// Decode the image at `path` using browser APIs and write its RGBA pixels
+    /// into `buf[0..buf_len]`. Writes the image dimensions and actual pixel
+    /// byte count to the three out-parameters. Throws when the path is unknown.
+    extern fn getTexture(
+        path_ptr: [*]const u8,
+        path_len: usize,
+        buf_ptr: [*]u8,
+        buf_len: usize,
+        out_width: *u32,
+        out_height: *u32,
+        out_pixels_len: *usize,
+    ) void;
 } else struct {};
 
 // ---------------------------------------------------------------------------
@@ -119,6 +160,12 @@ const GlProcs = if (!is_wasm) struct {
     DeleteShader: *const fn (c.GLuint) callconv(.c) void,
     DeleteProgram: *const fn (c.GLuint) callconv(.c) void,
     DeleteBuffers: *const fn (c.GLsizei, [*c]const c.GLuint) callconv(.c) void,
+    Uniform1i: *const fn (c.GLint, c.GLint) callconv(.c) void,
+    GenTextures: *const fn (c.GLsizei, [*c]c.GLuint) callconv(.c) void,
+    BindTexture: *const fn (c.GLenum, c.GLuint) callconv(.c) void,
+    TexImage2D: *const fn (c.GLenum, c.GLint, c.GLint, c.GLsizei, c.GLsizei, c.GLint, c.GLenum, c.GLenum, ?*const anyopaque) callconv(.c) void,
+    TexParameteri: *const fn (c.GLenum, c.GLenum, c.GLint) callconv(.c) void,
+    GenerateMipmap: *const fn (c.GLenum) callconv(.c) void,
 } else struct {};
 
 var gl_procs: GlProcs = undefined;
@@ -155,6 +202,12 @@ pub fn loadProcs() void {
         .DeleteShader = @ptrCast(proc("glDeleteShader")),
         .DeleteProgram = @ptrCast(proc("glDeleteProgram")),
         .DeleteBuffers = @ptrCast(proc("glDeleteBuffers")),
+        .Uniform1i = @ptrCast(proc("glUniform1i")),
+        .GenTextures = @ptrCast(proc("glGenTextures")),
+        .BindTexture = @ptrCast(proc("glBindTexture")),
+        .TexImage2D = @ptrCast(proc("glTexImage2D")),
+        .TexParameteri = @ptrCast(proc("glTexParameteri")),
+        .GenerateMipmap = @ptrCast(proc("glGenerateMipmap")),
     };
 }
 
@@ -265,7 +318,7 @@ pub fn glUseProgram(program: u32) void {
 
 pub fn glGetUniformLocation(program: u32, name: [*:0]const u8) i32 {
     if (is_wasm) {
-        return wasm.glGetUniformLocation(program, name, name.len);
+        return wasm.glGetUniformLocation(program, name, @intCast(std.mem.len(name)));
     } else {
         return @intCast(gl_procs.GetUniformLocation(@intCast(program), @ptrCast(name)));
     }
@@ -293,6 +346,55 @@ pub fn glDeleteProgram(program: u32) void {
 
 pub fn glDeleteBuffers(n: i32, buffers: [*]const u32) void {
     if (is_wasm) wasm.glDeleteBuffers(n, buffers) else gl_procs.DeleteBuffers(@intCast(n), @ptrCast(buffers));
+}
+
+pub fn glUniform1i(loc: i32, v: i32) void {
+    if (is_wasm) wasm.glUniform1i(loc, v) else gl_procs.Uniform1i(loc, v);
+}
+
+pub fn glGenTextures(n: i32, textures: [*]u32) void {
+    if (is_wasm) wasm.glGenTextures(n, textures) else gl_procs.GenTextures(@intCast(n), @ptrCast(textures));
+}
+
+pub fn glBindTexture(target: u32, tex: u32) void {
+    if (is_wasm) wasm.glBindTexture(target, tex) else gl_procs.BindTexture(@intCast(target), @intCast(tex));
+}
+
+pub fn glTexImage2D(
+    target: u32,
+    level: i32,
+    internal_format: i32,
+    width: i32,
+    height: i32,
+    border: i32,
+    format: u32,
+    typ: u32,
+    data: ?*const anyopaque,
+    data_len: usize,
+) void {
+    if (is_wasm) {
+        wasm.glTexImage2D(target, level, internal_format, width, height, border, format, typ, data, data_len);
+    } else {
+        gl_procs.TexImage2D(
+            @intCast(target),
+            level,
+            internal_format,
+            width,
+            height,
+            border,
+            @intCast(format),
+            @intCast(typ),
+            data,
+        );
+    }
+}
+
+pub fn glTexParameteri(target: u32, pname: u32, param: i32) void {
+    if (is_wasm) wasm.glTexParameteri(target, pname, param) else gl_procs.TexParameteri(@intCast(target), @intCast(pname), param);
+}
+
+pub fn glGenerateMipmap(target: u32) void {
+    if (is_wasm) wasm.glGenerateMipmap(target) else gl_procs.GenerateMipmap(@intCast(target));
 }
 
 pub fn logInfo(comptime fmt: []const u8, args: anytype) void {
@@ -325,14 +427,68 @@ pub fn logErr(comptime fmt: []const u8, args: anytype) void {
     }
 }
 
+/// Decoded RGBA pixel data returned by `texture()`.
+pub const TextureData = struct {
+    /// Raw RGBA8 pixels, row-major, top-to-bottom.
+    pixels: []const u8,
+    width: u32,
+    height: u32,
+};
+
+/// Decode the image at `path` (e.g. "cards/0.png") and return its RGBA pixels.
+///
+/// On wasm the browser decodes the image via an OffscreenCanvas; the result is
+/// written into a static per-call buffer and valid until the next call.
+/// On native libpng decodes the embedded PNG bytes; memory is allocated from
+/// the page allocator and owned by the caller — free `result.pixels` when done.
+///
+/// Panics when the path is unknown.
+pub fn texture(allocator: std.mem.Allocator, path: []const u8) !TextureData {
+    if (is_wasm) {
+        // The JS host decodes the image and writes RGBA pixels into our buffer.
+        // 1024 × 1024 × 4 = 4 MiB — enough for any card image.
+        const max_pixels = 1024 * 1024 * 4;
+        var buf = try allocator.alloc(u8, max_pixels);
+        var out_width: u32 = 0;
+        var out_height: u32 = 0;
+        var out_pixels_len: usize = 0;
+        wasm.getTexture(
+            path.ptr,
+            path.len,
+            buf.ptr,
+            buf.len,
+            &out_width,
+            &out_height,
+            &out_pixels_len,
+        );
+        return .{
+            .pixels = buf[0..out_pixels_len],
+            .width = out_width,
+            .height = out_height,
+        };
+    } else {
+        const sdl = @import("platform_sdl.zig");
+        return try sdl.loadTexture(allocator, path);
+    }
+}
+
+pub fn close() void {
+    if (is_wasm) {
+        // TODO maybe reload the page?
+    } else {
+        const sdl = @import("platform_sdl.zig");
+        sdl.close();
+    }
+}
+
 fn validateApp(comptime App: type) void {
     const required = .{
         .{ "onInit", fn () void },
         .{ "onResize", fn (c_uint, c_uint, f32) void },
-        .{ "onKeyDown", fn (c_uint) void },
-        .{ "onKeyUp", fn (c_uint) void },
-        .{ "onMouseDown", fn (c_uint, f32, f32) void },
-        .{ "onMouseUp", fn (c_uint, f32, f32) void },
+        .{ "onKeyDown", fn (Key) void },
+        .{ "onKeyUp", fn (Key) void },
+        .{ "onMouseDown", fn (MouseButton, f32, f32) void },
+        .{ "onMouseUp", fn (MouseButton, f32, f32) void },
         .{ "onMouseMove", fn (f32, f32) void },
         .{ "onAnimationFrame", fn () void },
     };
@@ -359,17 +515,17 @@ pub fn run(comptime App: type) void {
             export fn onResize(w: c_uint, h: c_uint, s: f32) void {
                 App.onResize(w, h, s);
             }
-            export fn onKeyDown(key: c_uint) void {
+            export fn onKeyDown(key: Key) void {
                 App.onKeyDown(key);
             }
-            export fn onKeyUp(key: c_uint) void {
+            export fn onKeyUp(key: Key) void {
                 App.onKeyUp(key);
             }
-            export fn onMouseDown(key: c_uint, x: f32, y: f32) void {
-                App.onMouseDown(key, x, y);
+            export fn onMouseDown(button: MouseButton, x: f32, y: f32) void {
+                App.onMouseDown(button, x, y);
             }
-            export fn onMouseUp(key: c_uint, x: f32, y: f32) void {
-                App.onMouseUp(key, x, y);
+            export fn onMouseUp(button: MouseButton, x: f32, y: f32) void {
+                App.onMouseUp(button, x, y);
             }
             export fn onMouseMove(x: f32, y: f32) void {
                 App.onMouseMove(x, y);

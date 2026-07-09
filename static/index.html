@@ -45,6 +45,44 @@
 
                 const canvas = document.getElementById("canvas");
                 const webgl = initWebGL(canvas, getString);
+
+                // -----------------------------------------------------------------
+                // Pre-fetch all card images and decode them to raw RGBA pixels
+                // using an OffscreenCanvas so getTexture() can serve them
+                // synchronously from Zig.
+                // Keys are the path strings e.g. "cards/0.png".
+                // Values are { width, height, pixels: Uint8ClampedArray }.
+                // -----------------------------------------------------------------
+
+                const cardNames = [
+                    "0","1","2","3","4","5","6","7","8","9",
+                    "10","11","12",
+                    "flip_three","freeze",
+                    "plus_2","plus_4","plus_6","plus_8","plus_10",
+                    "second_chance","x2",
+                ];
+
+                // Decode one PNG URL to { width, height, pixels } via ImageBitmap + OffscreenCanvas.
+                async function decodeImage(url) {
+                    const resp = await fetch(url);
+                    if (!resp.ok) throw new Error(`Failed to fetch ${url}: ${resp.status}`);
+                    const blob = await resp.blob();
+                    const bitmap = await createImageBitmap(blob);
+                    const { width, height } = bitmap;
+                    const offscreen = new OffscreenCanvas(width, height);
+                    const ctx2d = offscreen.getContext("2d");
+                    ctx2d.drawImage(bitmap, 0, 0);
+                    bitmap.close();
+                    const imageData = ctx2d.getImageData(0, 0, width, height);
+                    return { width, height, pixels: imageData.data };
+                }
+
+                const textureCache = new Map();
+                await Promise.all(cardNames.map(async (name) => {
+                    const path = `cards/${name}.png`;
+                    textureCache.set(path, await decodeImage(path));
+                }));
+
                 const env = {
                     logInfo(ptr, len) {
                         console.log(getString(ptr, len));
@@ -54,6 +92,25 @@
                     },
                     logErr(ptr, len) {
                         console.error(getString(ptr, len));
+                    },
+
+                    // path_ptr/path_len:     image path string in wasm memory (e.g. "cards/0.png")
+                    // buf_ptr/buf_len:        caller-allocated RGBA pixel buffer in wasm memory
+                    // out_width_ptr:          where to write image width  (u32, little-endian)
+                    // out_height_ptr:         where to write image height (u32, little-endian)
+                    // out_pixels_len_ptr:     where to write pixel byte count (usize = u32 on wasm32)
+                    getTexture(path_ptr, path_len, buf_ptr, buf_len, out_width_ptr, out_height_ptr, out_pixels_len_ptr) {
+                        const path = getString(path_ptr, path_len);
+                        const entry = textureCache.get(path);
+                        if (!entry) throw new Error(`getTexture: unknown path '${path}'`);
+                        const { width, height, pixels } = entry;
+                        if (pixels.length > buf_len)
+                            throw new Error(`getTexture: buffer too small for '${path}' (need ${pixels.length}, got ${buf_len})`);
+                        new Uint8Array(wasmMemory.buffer, buf_ptr, pixels.length).set(pixels);
+                        const dv = new DataView(wasmMemory.buffer);
+                        dv.setUint32(out_width_ptr,      width,          true);
+                        dv.setUint32(out_height_ptr,     height,         true);
+                        dv.setUint32(out_pixels_len_ptr, pixels.length,  true);
                     },
 
                     ...webgl,

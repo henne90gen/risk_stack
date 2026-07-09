@@ -1,11 +1,13 @@
-#version 300 es
+#version 330 core
 
 precision mediump float;
 
-in vec3 vColor;
+in vec2 vUV;
+
+uniform sampler2D uTex;
 
 out vec4 fragColor;
 
 void main() {
-    fragColor = vec4(vColor, 1.0);
+    fragColor = texture(uTex, vUV);
 }

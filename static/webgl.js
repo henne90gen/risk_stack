@@ -269,6 +269,7 @@ function initWebGL(canvas, getString) {
     }
   };
   const glBindVertexArray = (id) => gl.bindVertexArray(glVertexArrays[id]);
+  const glGenerateMipmap = (target) => gl.generateMipmap(target);
   const glPixelStorei = (type, alignment) => gl.pixelStorei(type, alignment);
   const glGetError = () => gl.getError();
 
@@ -311,6 +312,7 @@ function initWebGL(canvas, getString) {
     glBindTexture,
     glTexImage2D,
     glTexParameteri,
+    glGenerateMipmap,
     glActiveTexture,
     glCreateVertexArray,
     glGenVertexArrays,
