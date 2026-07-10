@@ -88,6 +88,10 @@ const wasm = if (is_wasm) struct {
     extern fn glCreateShader(typ: u32) u32;
     extern fn glShaderSource(shader: u32, src: [*]const u8, len: i32) void;
     extern fn glCompileShader(shader: u32) void;
+    extern fn glGetShaderiv(shader: u32, pname: u32, params: *i32) void;
+    extern fn glGetShaderInfoLog(shader: u32, buf_ptr: [*]u8, buf_len: usize, out_len: *usize) void;
+    extern fn glGetProgramiv(program: u32, pname: u32, params: *i32) void;
+    extern fn glGetProgramInfoLog(program: u32, buf_ptr: [*]u8, buf_len: usize, out_len: *usize) void;
     extern fn glCreateProgram() u32;
     extern fn glAttachShader(program: u32, shader: u32) void;
     extern fn glLinkProgram(program: u32) void;
@@ -157,6 +161,10 @@ const GlProcs = if (!is_wasm) struct {
     CreateShader: *const fn (c.GLenum) callconv(.c) c.GLuint,
     ShaderSource: *const fn (c.GLuint, c.GLsizei, [*c]const [*c]const c.GLchar, [*c]const c.GLint) callconv(.c) void,
     CompileShader: *const fn (c.GLuint) callconv(.c) void,
+    GetShaderiv: *const fn (c.GLuint, c.GLenum, [*c]c.GLint) callconv(.c) void,
+    GetShaderInfoLog: *const fn (c.GLuint, c.GLsizei, [*c]c.GLsizei, [*c]c.GLchar) callconv(.c) void,
+    GetProgramiv: *const fn (c.GLuint, c.GLenum, [*c]c.GLint) callconv(.c) void,
+    GetProgramInfoLog: *const fn (c.GLuint, c.GLsizei, [*c]c.GLsizei, [*c]c.GLchar) callconv(.c) void,
     CreateProgram: *const fn () callconv(.c) c.GLuint,
     AttachShader: *const fn (c.GLuint, c.GLuint) callconv(.c) void,
     LinkProgram: *const fn (c.GLuint) callconv(.c) void,
@@ -203,6 +211,10 @@ pub fn loadProcs() void {
         .CreateShader = @ptrCast(proc("glCreateShader")),
         .ShaderSource = @ptrCast(proc("glShaderSource")),
         .CompileShader = @ptrCast(proc("glCompileShader")),
+        .GetShaderiv = @ptrCast(proc("glGetShaderiv")),
+        .GetShaderInfoLog = @ptrCast(proc("glGetShaderInfoLog")),
+        .GetProgramiv = @ptrCast(proc("glGetProgramiv")),
+        .GetProgramInfoLog = @ptrCast(proc("glGetProgramInfoLog")),
         .CreateProgram = @ptrCast(proc("glCreateProgram")),
         .AttachShader = @ptrCast(proc("glAttachShader")),
         .LinkProgram = @ptrCast(proc("glLinkProgram")),
@@ -319,6 +331,34 @@ pub fn glShaderSource(shader: u32, src: [*:0]const u8, len: i32) void {
 
 pub fn glCompileShader(shader: u32) void {
     if (is_wasm) wasm.glCompileShader(shader) else gl_procs.CompileShader(@intCast(shader));
+}
+
+pub fn glGetShaderiv(shader: u32, pname: u32, params: *i32) void {
+    if (is_wasm) wasm.glGetShaderiv(shader, pname, params) else gl_procs.GetShaderiv(@intCast(shader), @intCast(pname), @ptrCast(params));
+}
+
+pub fn glGetShaderInfoLog(shader: u32, buf: []u8, out_len: *usize) void {
+    if (is_wasm) {
+        wasm.glGetShaderInfoLog(shader, buf.ptr, buf.len, out_len);
+    } else {
+        var gl_len: c.GLsizei = 0;
+        gl_procs.GetShaderInfoLog(@intCast(shader), @intCast(buf.len), &gl_len, @ptrCast(buf.ptr));
+        out_len.* = @intCast(gl_len);
+    }
+}
+
+pub fn glGetProgramiv(program: u32, pname: u32, params: *i32) void {
+    if (is_wasm) wasm.glGetProgramiv(program, pname, params) else gl_procs.GetProgramiv(@intCast(program), @intCast(pname), @ptrCast(params));
+}
+
+pub fn glGetProgramInfoLog(program: u32, buf: []u8, out_len: *usize) void {
+    if (is_wasm) {
+        wasm.glGetProgramInfoLog(program, buf.ptr, buf.len, out_len);
+    } else {
+        var gl_len: c.GLsizei = 0;
+        gl_procs.GetProgramInfoLog(@intCast(program), @intCast(buf.len), &gl_len, @ptrCast(buf.ptr));
+        out_len.* = @intCast(gl_len);
+    }
 }
 
 pub fn glCreateProgram() u32 {

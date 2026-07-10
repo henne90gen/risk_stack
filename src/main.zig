@@ -57,9 +57,9 @@ pub const TriangleApp = struct {
         app_state = AppState{ .allocator = std.heap.page_allocator };
 
         // --- shader program ------------------------------------------------
-        const vert = glInitShader(vert_src, vert_src.len, p.GL_VERTEX_SHADER);
-        const frag = glInitShader(frag_src, frag_src.len, p.GL_FRAGMENT_SHADER);
-        app_state.tri_program = glLinkShaderProgram(vert, frag);
+        const vert = glInitShader(vert_src, vert_src.len, p.GL_VERTEX_SHADER) catch @panic("vertex shader compilation failed");
+        const frag = glInitShader(frag_src, frag_src.len, p.GL_FRAGMENT_SHADER) catch @panic("fragment shader compilation failed");
+        app_state.tri_program = glLinkShaderProgram(vert, frag) catch @panic("shader program linking failed");
 
         // --- geometry -------------------------------------------------------
         p.glGenVertexArrays(1, @as([*]u32, @ptrCast(&app_state.tri_vao)));
@@ -181,9 +181,7 @@ pub const TriangleApp = struct {
     }
 
     pub fn onAnimationFrame() void {
-        render() catch |err| {
-            p.logErr("render failed: {}", .{err});
-        };
+        render() catch |err| p.logErr("render failed: {}", .{err});
     }
 
     fn render() !void {
@@ -238,20 +236,40 @@ pub const TriangleApp = struct {
     }
 };
 
-fn glInitShader(src: [:0]const u8, len: i32, typ: u32) u32 {
+fn glInitShader(src: [:0]const u8, len: i32, typ: u32) !u32 {
     const shader = p.glCreateShader(typ);
     p.glShaderSource(shader, src, len);
     p.glCompileShader(shader);
+    var status: i32 = 0;
+    p.glGetShaderiv(shader, p.GL_COMPILE_STATUS, &status);
+    if (status == p.GL_FALSE) {
+        var log_buf: [1024]u8 = undefined;
+        var log_len: usize = 0;
+        p.glGetShaderInfoLog(shader, log_buf[0..], &log_len);
+        p.logErr("shader compilation failed:\n{s}", .{log_buf[0..log_len]});
+        p.glDeleteShader(shader);
+        return error.ShaderCompilationFailed;
+    }
     return shader;
 }
 
-fn glLinkShaderProgram(vert: u32, frag: u32) u32 {
+fn glLinkShaderProgram(vert: u32, frag: u32) !u32 {
     const prog = p.glCreateProgram();
     p.glAttachShader(prog, vert);
     p.glAttachShader(prog, frag);
     p.glLinkProgram(prog);
     p.glDeleteShader(vert);
     p.glDeleteShader(frag);
+    var status: i32 = 0;
+    p.glGetProgramiv(prog, p.GL_LINK_STATUS, &status);
+    if (status == p.GL_FALSE) {
+        var log_buf: [1024]u8 = undefined;
+        var log_len: usize = 0;
+        p.glGetProgramInfoLog(prog, log_buf[0..], &log_len);
+        p.logErr("shader program linking failed:\n{s}", .{log_buf[0..log_len]});
+        p.glDeleteProgram(prog);
+        return error.ShaderLinkFailed;
+    }
     return prog;
 }
 
