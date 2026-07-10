@@ -122,7 +122,8 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_tests.step);
     }
 
-    { // wasm module
+    const build_wasm = b.option(bool, "wasm", "Build the WebAssembly module (default: true)") orelse true;
+    if (build_wasm) { // wasm module
         const wasm_target = b.resolveTargetQuery(.{
             .cpu_arch = .wasm32,
             .os_tag = .freestanding,

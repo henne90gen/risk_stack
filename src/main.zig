@@ -3,6 +3,7 @@ const t = std.testing;
 
 pub const p = @import("platform.zig");
 const zm = @import("zmath");
+const f = @import("flip7.zig");
 
 test {
     t.refAllDecls(@This());
@@ -48,13 +49,41 @@ const AppState = struct {
     u_loc_projection: i32 = 0,
 
     aspect_ratio: f32 = 1.0,
+
+    // --- game state ----------------------------------------
+
+    prng: std.Random.DefaultPrng,
+    players: [3]f.Player,
+    deck: f.Deck,
+    simulation: f.GameSimulation = undefined,
+    should_run_next_step: bool = false,
+    next_event_to_process_index: usize = 0,
+
+    pub fn init(allocator: std.mem.Allocator) !AppState {
+        var prng = std.Random.DefaultPrng.init(0);
+        return AppState{
+            .allocator = allocator,
+            .prng = prng,
+            .players = [_]f.Player{
+                try .init(allocator, prng.random(), f.DrawStrategy{ .MinPoints = 20 }),
+                try .init(allocator, prng.random(), f.DrawStrategy{ .MinPoints = 30 }),
+                try .init(allocator, prng.random(), f.DrawStrategy{ .MinPoints = 40 }),
+            },
+            .deck = try f.Deck.init(allocator, prng.random()),
+        };
+    }
+
+    pub fn resetInputTracking(self: *AppState) void {
+        self.should_run_next_step = false;
+    }
 };
 
 var app_state: AppState = undefined;
 
 pub const TriangleApp = struct {
     pub fn onInit() void {
-        app_state = AppState{ .allocator = std.heap.page_allocator };
+        app_state = AppState.init(std.heap.page_allocator) catch @panic("failed to initialize app state");
+        app_state.simulation = f.GameSimulation.init(app_state.allocator, app_state.prng.random(), &app_state.deck, &app_state.players) catch @panic("failed to initialize game simulation");
 
         // --- shader program ------------------------------------------------
         const vert = glInitShader(vert_src, vert_src.len, p.GL_VERTEX_SHADER) catch @panic("vertex shader compilation failed");
@@ -157,11 +186,16 @@ pub const TriangleApp = struct {
     }
 
     pub fn onKeyDown(key: p.Key) void {
-        if (key == p.Key.Escape) {
-            p.logInfo("Escape key pressed, exiting...", .{});
-            p.close();
+        switch (key) {
+            p.Key.Escape => {
+                p.logInfo("Escape key pressed, exiting...", .{});
+                p.close();
+            },
+            p.Key.Space => {
+                app_state.should_run_next_step = true;
+            },
+            else => p.logInfo("onKeyDown: {}", .{key}),
         }
-        p.logInfo("onKeyDown: {}", .{key});
     }
 
     pub fn onKeyUp(key: p.Key) void {
@@ -192,13 +226,6 @@ pub const TriangleApp = struct {
         p.glBindTexture(p.GL_TEXTURE_2D, app_state.card_texture);
         p.glBindVertexArray(app_state.tri_vao);
 
-        const positions = [4][2]f32{
-            .{ 0.0, 0.0 },
-            .{ 1.0, 0.0 },
-            .{ 1.0, 1.0 },
-            .{ 0.0, 1.0 },
-        };
-
         const world_to_view = zm.lookAtRh(
             zm.f32x4(3.0, 3.0, 3.0, 1.0), // eye position
             zm.f32x4(0.0, 0.0, 0.0, 1.0), // focus point
@@ -211,6 +238,12 @@ pub const TriangleApp = struct {
 
         var instance_matrices = try std.ArrayList(zm.Mat).initCapacity(app_state.allocator, 0);
         defer instance_matrices.deinit(app_state.allocator);
+        const positions = [4][2]f32{
+            .{ 0.0, 0.0 },
+            .{ 1.0, 0.0 },
+            .{ 1.0, 1.0 },
+            .{ 0.0, 1.0 },
+        };
         for (positions) |pos| {
             const object_to_world = zm.mul(
                 zm.translation(pos[0], pos[1], 0.0),
@@ -233,6 +266,24 @@ pub const TriangleApp = struct {
         p.glBindVertexArray(0);
         p.glBindTexture(p.GL_TEXTURE_2D, 0);
         p.glUseProgram(0);
+
+        if (app_state.should_run_next_step) {
+            const game_should_continue = try app_state.simulation.step();
+            if (!game_should_continue) {
+                const game_result = app_state.simulation.result();
+                p.logInfo("game finished -> strategy {} won", .{game_result.winning_strategy});
+            } else {
+                if (app_state.simulation.events.items.len != 0) {
+                    const events = app_state.simulation.events.items[app_state.next_event_to_process_index..app_state.simulation.events.items.len];
+                    app_state.next_event_to_process_index = app_state.simulation.events.items.len;
+                    for (events) |event| {
+                        p.logInfo("event: {}", .{event});
+                    }
+                }
+            }
+        }
+
+        app_state.resetInputTracking();
     }
 };
 

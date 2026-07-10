@@ -44,9 +44,11 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("Simulating {d} games\n", .{ctx.games});
 
             for (0..ctx.games) |_| {
-                const result = try runGame(ctx.allocator, ctx.io, ctx.prng.random());
+                const start_time = std.Io.Clock.now(.real, ctx.io);
+                const result = try runGame(ctx.allocator, ctx.prng.random());
+                const end_time = std.Io.Clock.now(.real, ctx.io);
                 local_cards_played += result.cards_played;
-                local_runtime = .fromNanoseconds(local_runtime.nanoseconds + result.runtime.nanoseconds);
+                local_runtime = .fromNanoseconds(local_runtime.nanoseconds + start_time.durationTo(end_time).nanoseconds);
                 const current_wins = local_wins.get(result.winning_strategy) orelse 0;
                 try local_wins.put(result.winning_strategy, current_wins + 1);
             }
@@ -63,7 +65,7 @@ pub fn main(init: std.process.Init) !void {
             }
         }
 
-        fn runGame(task_allocator: std.mem.Allocator, io: std.Io, prng: std.Random) !f7.GameResult {
+        fn runGame(task_allocator: std.mem.Allocator, prng: std.Random) !f7.GameResult {
             var arena = std.heap.ArenaAllocator.init(task_allocator);
             defer arena.deinit();
             const arena_allocator = arena.allocator();
@@ -102,8 +104,8 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
 
-            var simulation = try f7.GameSimulation.init(arena_allocator, io, prng, &deck, &players);
-            defer simulation.deinit(arena_allocator);
+            var simulation = try f7.GameSimulation.init(arena_allocator, prng, &deck, &players);
+            defer simulation.deinit();
 
             while (try simulation.step()) {}
             return simulation.result();

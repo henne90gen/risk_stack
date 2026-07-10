@@ -6,7 +6,7 @@ test {
     t.refAllDecls(@This());
 }
 
-const Card = enum(u8) {
+pub const Card = enum(u8) {
     Zero = 0,
     One = 1,
     Two = 2,
@@ -39,18 +39,24 @@ const Card = enum(u8) {
 };
 
 pub const Deck = struct {
-    cards: std.ArrayList(Card),
     prng: std.Random,
+    cards: std.ArrayList(Card),
+    discarded: std.ArrayList(Card),
 
     pub fn init(allocator: std.mem.Allocator, prng: std.Random) !Deck {
-        const cards = try std.ArrayList(Card).initCapacity(allocator, 94);
-        var deck = Deck{ .cards = cards, .prng = prng };
+        var deck = Deck{
+            .prng = prng,
+            .cards = try std.ArrayList(Card).initCapacity(allocator, 94),
+            .discarded = try std.ArrayList(Card).initCapacity(allocator, 94),
+        };
         try deck.refill(allocator);
+        deck.shuffle();
         return deck;
     }
 
     pub fn deinit(self: *Deck, allocator: std.mem.Allocator) void {
         self.cards.deinit(allocator);
+        self.discarded.deinit(allocator);
     }
 
     pub fn shuffle(self: *Deck) void {
@@ -58,6 +64,9 @@ pub const Deck = struct {
     }
 
     pub fn refill(self: *Deck, allocator: std.mem.Allocator) !void {
+        self.discarded.clearRetainingCapacity();
+        self.cards.clearRetainingCapacity();
+
         try self.cards.append(allocator, Card.Zero);
         try self.cards.append(allocator, Card.One);
         try self.cards.append(allocator, Card.Two);
@@ -594,64 +603,84 @@ pub const Player = struct {
     }
 };
 
+pub const GameEvent = union(enum) {
+    PlayerEliminated: struct {
+        player: *Player,
+    },
+    PlayerEndRound: struct {
+        player: *Player,
+        score: u32,
+    },
+    PlayerWon: struct {
+        player: *Player,
+        score: u32,
+    },
+    DeckShuffle: struct {},
+    DrawCard: struct {
+        player: *Player,
+        card: Card,
+    },
+    NewRoundStarted: struct {},
+};
+
+pub const GameResult = struct {
+    winning_strategy: DrawStrategy,
+    cards_played: u64,
+};
+
 pub const GameSimulation = struct {
     allocator: std.mem.Allocator,
-    io: std.Io,
     prng: std.Random,
     deck: *Deck,
     players: []Player,
     player_selection_buffer: []*Player,
+    current_player_index: u32,
     cards_played: u32 = 0,
 
-    start_time: ?std.Io.Timestamp = null,
-    current_player_index: u32 = 0,
+    events: std.ArrayList(GameEvent) = undefined,
 
     result_: ?GameResult = null,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, prng: std.Random, deck: *Deck, players: []Player) !GameSimulation {
+    pub fn init(allocator: std.mem.Allocator, prng: std.Random, deck: *Deck, players: []Player) !GameSimulation {
         return GameSimulation{
             .allocator = allocator,
-            .io = io,
             .prng = prng,
             .deck = deck,
             .players = players,
             .player_selection_buffer = try allocator.alloc(*Player, players.len),
+            .current_player_index = 0,
+            .events = try std.ArrayList(GameEvent).initCapacity(allocator, 100),
         };
     }
 
-    pub fn deinit(self: *GameSimulation, allocator: std.mem.Allocator) void {
-        allocator.free(self.player_selection_buffer);
+    pub fn deinit(self: *GameSimulation) void {
+        self.allocator.free(self.player_selection_buffer);
+        self.events.deinit(self.allocator);
     }
 
     pub fn step(self: *GameSimulation) !bool {
-        if (self.start_time == null) {
-            // first call to step -> initializing
-            self.start_time = std.Io.Clock.now(.real, self.io);
-
-            self.deck.shuffle();
-            self.current_player_index = @intCast(self.players.len);
-        }
+        self.log("Step: current_player_index = {}, cards_played = {}, deck_size = {}", .{ self.current_player_index, self.cards_played, self.deck.cards.items.len });
 
         if (self.result_ != null) {
             // game simulation is already finished
+            self.log("Game simulation is already finished", .{});
             return false;
         }
 
-        var winning_player: ?Player = null;
-        for (self.players) |player| {
+        var winning_player: ?*Player = null;
+        for (self.players) |*player| {
             if (player.score >= 200) {
                 winning_player = player;
                 break;
             }
         }
         if (winning_player) |player| {
-            const end_time = std.Io.Clock.now(.real, self.io);
-            const runtime = self.start_time.?.durationTo(end_time);
             self.result_ = GameResult{
                 .winning_strategy = player.strategy,
                 .cards_played = self.cards_played,
-                .runtime = runtime,
             };
+            try self.addEvent(.{ .PlayerWon = .{ .player = player, .score = player.score } });
+            self.log("Game simulation finished: player with strategy {} won with score {}", .{ player.strategy, player.score });
             return false;
         }
 
@@ -666,6 +695,29 @@ pub const GameSimulation = struct {
             for (self.players) |*p| {
                 p.nextRound();
             }
+            try self.addEvent(.{ .NewRoundStarted = .{} });
+        }
+
+        if (self.deck.cards.items.len == 0) {
+            try self.deck.refill(self.allocator);
+            self.deck.shuffle();
+            try self.addEvent(.{ .DeckShuffle = .{} });
+        }
+
+        const starting_player_index = self.current_player_index;
+        var player = &self.players[self.current_player_index];
+        while (!player.is_still_in_game) {
+            self.current_player_index += 1;
+            if (self.current_player_index >= self.players.len) {
+                self.current_player_index = 0;
+            }
+            player = &self.players[self.current_player_index];
+
+            if (self.current_player_index == starting_player_index) {
+                // should never happen, but just in case: all players are eliminated, start a new round
+                self.log("All players are eliminated, starting a new round", .{});
+                return true;
+            }
         }
 
         self.current_player_index += 1;
@@ -673,25 +725,17 @@ pub const GameSimulation = struct {
             self.current_player_index = 0;
         }
 
-        if (self.deck.cards.items.len == 0) {
-            try self.deck.refill(self.allocator);
-            self.deck.shuffle();
-        }
-
-        var player = &self.players[self.current_player_index];
-        if (!player.is_still_in_game) {
-            return true;
-        }
-
         if (!player.decideTakeCard(self.deck)) {
             player.endRound();
+            try self.addEvent(.{ .PlayerEndRound = .{ .player = player, .score = player.score } });
+            return true;
         }
 
         const card = self.deck.cards.pop().?;
         self.cards_played += 1;
         switch (card) {
             .Freeze => {
-                self.handleFreeze(player);
+                try self.handleFreeze(player);
                 return true;
             },
             .FlipThree => {
@@ -703,11 +747,8 @@ pub const GameSimulation = struct {
                 return true;
             },
             else => {
-                if (player.takeCard(card)) {
-                    for (self.players) |*p| {
-                        p.nextRound();
-                    }
-                }
+                _ = player.takeCard(card);
+                try self.addEvent(.{ .DrawCard = .{ .player = player, .card = card } });
             },
         }
 
@@ -721,6 +762,7 @@ pub const GameSimulation = struct {
     fn handleSecondChance(self: *GameSimulation, player: *Player, card: Card) error{OutOfMemory}!void {
         if (!player.hasCard(card)) {
             _ = player.takeCard(card);
+            try self.addEvent(.{ .DrawCard = .{ .player = player, .card = card } });
             return;
         }
 
@@ -740,9 +782,10 @@ pub const GameSimulation = struct {
 
         const random_index = self.prng.intRangeLessThan(usize, 0, available_players.items.len);
         _ = available_players.items[random_index].takeCard(card);
+        try self.addEvent(.{ .DrawCard = .{ .player = player, .card = card } });
     }
 
-    fn handleFreeze(self: *GameSimulation, player: *Player) void {
+    fn handleFreeze(self: *GameSimulation, player: *Player) !void {
         // TODO make this a configurable strategy, doing it randomly for now
         var available_players = std.ArrayList(*Player).initBuffer(self.player_selection_buffer);
         for (self.players) |*p| {
@@ -757,6 +800,7 @@ pub const GameSimulation = struct {
 
         if (available_players.items.len == 0) {
             player.endRound();
+            try self.addEvent(.{ .PlayerEliminated = .{ .player = player } });
             return;
         }
 
@@ -773,6 +817,7 @@ pub const GameSimulation = struct {
             if (self.deck.cards.items.len == 0) {
                 try self.deck.refill(self.allocator);
                 self.deck.shuffle();
+                try self.addEvent(.{ .DeckShuffle = .{} });
             }
 
             const drawn = self.deck.cards.pop().?;
@@ -791,6 +836,7 @@ pub const GameSimulation = struct {
             }
 
             const round_over = player.takeCard(drawn);
+            try self.addEvent(.{ .DrawCard = .{ .player = player, .card = drawn } });
             if (round_over or !player.is_still_in_game) {
                 should_resolve_action_cards = false;
                 break;
@@ -802,7 +848,7 @@ pub const GameSimulation = struct {
                 try self.handleFlipThree(player);
             }
             for (0..freeze_count) |_| {
-                self.handleFreeze(player);
+                try self.handleFreeze(player);
             }
         }
     }
@@ -853,8 +899,8 @@ pub const GameSimulation = struct {
         try deck.cards.append(allocator, .Two);
         try deck.cards.append(allocator, .Three);
 
-        var simulation = try GameSimulation.init(allocator, t.io, prng, &deck, &players);
-        defer simulation.deinit(allocator);
+        var simulation = try GameSimulation.init(allocator, prng, &deck, &players);
+        defer simulation.deinit();
 
         const drawing_player = &players[0];
         try simulation.handleFlipThree(drawing_player);
@@ -892,8 +938,8 @@ pub const GameSimulation = struct {
         try deck.cards.append(allocator, .Four);
         try deck.cards.append(allocator, .Five);
 
-        var simulation = try GameSimulation.init(allocator, t.io, prng, &deck, &players);
-        defer simulation.deinit(allocator);
+        var simulation = try GameSimulation.init(allocator, prng, &deck, &players);
+        defer simulation.deinit();
 
         const drawing_player = &players[0];
         try simulation.handleFlipThree(drawing_player);
@@ -939,8 +985,8 @@ pub const GameSimulation = struct {
         try deck.cards.append(allocator, .FlipThree);
         try deck.cards.append(allocator, .FlipThree);
 
-        var simulation = try GameSimulation.init(allocator, t.io, prng, &deck, &players);
-        defer simulation.deinit(allocator);
+        var simulation = try GameSimulation.init(allocator, prng, &deck, &players);
+        defer simulation.deinit();
 
         const drawing_player = &players[0];
         try simulation.handleFlipThree(drawing_player);
@@ -982,8 +1028,8 @@ pub const GameSimulation = struct {
         try deck.cards.append(allocator, .One);
         try deck.cards.append(allocator, .Two);
 
-        var simulation = try GameSimulation.init(allocator, t.io, prng, &deck, &players);
-        defer simulation.deinit(allocator);
+        var simulation = try GameSimulation.init(allocator, prng, &deck, &players);
+        defer simulation.deinit();
 
         const drawing_player = &players[0];
         try simulation.handleFlipThree(drawing_player);
@@ -1019,8 +1065,8 @@ pub const GameSimulation = struct {
         try deck.cards.append(allocator, .Freeze);
         try deck.cards.append(allocator, .Freeze);
 
-        var simulation = try GameSimulation.init(allocator, t.io, prng, &deck, &players);
-        defer simulation.deinit(allocator);
+        var simulation = try GameSimulation.init(allocator, prng, &deck, &players);
+        defer simulation.deinit();
 
         const drawing_player = &players[0];
         try simulation.handleFlipThree(drawing_player);
@@ -1032,10 +1078,13 @@ pub const GameSimulation = struct {
 
         try t.expectEqual(false, drawing_player.is_still_in_game);
     }
-};
 
-pub const GameResult = struct {
-    winning_strategy: DrawStrategy,
-    cards_played: u64,
-    runtime: std.Io.Duration,
+    fn addEvent(self: *GameSimulation, event: GameEvent) !void {
+        try self.events.append(self.allocator, event);
+    }
+
+    fn log(self: *GameSimulation, comptime fmt:  []const u8, args: anytype) void {
+        _ = self;
+        std.debug.print(fmt ++ "\n", args);
+    }
 };
