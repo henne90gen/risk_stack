@@ -1,4 +1,6 @@
 const std = @import("std");
+const t = std.testing;
+
 const p = @import("platform.zig");
 
 const c = @cImport({
@@ -9,6 +11,11 @@ const c = @cImport({
 const png = @cImport({
     @cInclude("png.h");
 });
+
+const cards = @import("cards.zig");
+test {
+    t.refAllDecls(@This());
+}
 
 // ---------------------------------------------------------------------------
 // SDL scancode → JS keyCode translation
@@ -58,7 +65,7 @@ pub fn close() void {
 
 const ReadState = struct { data: []const u8, pos: usize };
 pub fn loadTexture(allocator: std.mem.Allocator, path: []const u8) !p.TextureData {
-    const cards = @import("cards.zig");
+    // const cards = @import("cards.zig");
     const card = cards.Card.fromPath(path) orelse
         std.debug.panic("texture: unknown path '{s}'", .{path});
     const png_bytes = card.bytes();
@@ -248,6 +255,11 @@ pub fn run(comptime App: type) void {
                 c.SDL_EVENT_MOUSE_MOTION => {
                     const me = event.motion;
                     App.onMouseMove(me.x, me.y);
+                },
+
+                c.SDL_EVENT_MOUSE_WHEEL => {
+                    // SDL reports scroll in logical lines; positive y = scroll up = zoom in.
+                    App.onMouseWheel(event.wheel.y);
                 },
 
                 else => {},

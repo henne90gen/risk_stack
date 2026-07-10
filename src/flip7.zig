@@ -1083,8 +1083,11 @@ pub const GameSimulation = struct {
         try self.events.append(self.allocator, event);
     }
 
-    fn log(self: *GameSimulation, comptime fmt:  []const u8, args: anytype) void {
+    fn log(self: *GameSimulation, comptime fmt: []const u8, args: anytype) void {
         _ = self;
-        std.debug.print(fmt ++ "\n", args);
+        const is_wasm = @import("builtin").target.cpu.arch == .wasm32;
+        if (!is_wasm) {
+            std.debug.print(fmt ++ "\n", args);
+        }
     }
 };

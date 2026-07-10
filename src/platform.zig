@@ -1,7 +1,13 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const t = std.testing;
 
 pub const is_wasm = builtin.target.cpu.arch == .wasm32;
+const sdl = if (!is_wasm) @import("platform_sdl.zig") else void;
+
+test {
+    t.refAllDecls(@This());
+}
 
 // ---------------------------------------------------------------------------
 // Key constants
@@ -536,7 +542,6 @@ pub fn texture(allocator: std.mem.Allocator, path: []const u8) !TextureData {
             .height = out_height,
         };
     } else {
-        const sdl = @import("platform_sdl.zig");
         return try sdl.loadTexture(allocator, path);
     }
 }
@@ -545,7 +550,6 @@ pub fn close() void {
     if (is_wasm) {
         // TODO maybe reload the page?
     } else {
-        const sdl = @import("platform_sdl.zig");
         sdl.close();
     }
 }
@@ -559,6 +563,7 @@ fn validateApp(comptime App: type) void {
         .{ "onMouseDown", fn (MouseButton, f32, f32) void },
         .{ "onMouseUp", fn (MouseButton, f32, f32) void },
         .{ "onMouseMove", fn (f32, f32) void },
+        .{ "onMouseWheel", fn (f32) void },
         .{ "onAnimationFrame", fn () void },
     };
     inline for (required) |entry| {
@@ -602,13 +607,15 @@ pub fn run(comptime App: type) void {
             export fn onMouseMove(x: f32, y: f32) void {
                 App.onMouseMove(x, y);
             }
+            export fn onMouseWheel(delta: f32) void {
+                App.onMouseWheel(delta);
+            }
             export fn onAnimationFrame() void {
                 App.onAnimationFrame();
             }
         };
         _ = Exports;
     } else {
-        const sdl = @import("platform_sdl.zig");
         sdl.run(App);
     }
 }

@@ -36,6 +36,60 @@ const quad_vertices = [_]f32{
     -0.5, 0.5, 0.0, 0.0, // top-left
 };
 
+const card_texture_paths = [_][]const u8{
+    "/cards/0.png",
+    "/cards/1.png",
+    "/cards/2.png",
+    "/cards/3.png",
+    "/cards/4.png",
+    "/cards/5.png",
+    "/cards/6.png",
+    "/cards/7.png",
+    "/cards/8.png",
+    "/cards/9.png",
+    "/cards/10.png",
+    "/cards/11.png",
+    "/cards/12.png",
+    "/cards/second_chance.png",
+    "/cards/freeze.png",
+    "/cards/flip_three.png",
+    "/cards/plus_2.png",
+    "/cards/plus_4.png",
+    "/cards/plus_6.png",
+    "/cards/plus_8.png",
+    "/cards/plus_10.png",
+    "/cards/x2.png",
+    "/cards/back.png",
+};
+const back_texture_index: usize = card_texture_paths.len - 1;
+
+fn cardTextureIndex(card: f.Card) usize {
+    return switch (card) {
+        .Zero => 0,
+        .One => 1,
+        .Two => 2,
+        .Three => 3,
+        .Four => 4,
+        .Five => 5,
+        .Six => 6,
+        .Seven => 7,
+        .Eight => 8,
+        .Nine => 9,
+        .Ten => 10,
+        .Eleven => 11,
+        .Twelve => 12,
+        .SecondChance => 13,
+        .Freeze => 14,
+        .FlipThree => 15,
+        .PlusTwo => 16,
+        .PlusFour => 17,
+        .PlusSix => 18,
+        .PlusEight => 19,
+        .PlusTen => 20,
+        .TimesTwo => 21,
+    };
+}
+
 const AppState = struct {
     allocator: std.mem.Allocator,
 
@@ -43,14 +97,18 @@ const AppState = struct {
     tri_vao: u32 = 0,
     tri_vbo: u32 = 0,
     instance_vbo: u32 = 0,
-    card_texture: u32 = 0,
+    card_textures: [card_texture_paths.len]u32 = [_]u32{0} ** card_texture_paths.len,
     u_loc_texture: i32 = 0,
     u_loc_view: i32 = 0,
     u_loc_projection: i32 = 0,
 
     aspect_ratio: f32 = 1.0,
 
-    // --- game state ----------------------------------------
+    // --- zoom state ----------------------------------------
+    // zoom_target is updated immediately on scroll events; zoom_current
+    // follows it smoothly via exponential lerp each frame.
+    zoom_target: f32 = 1.0,
+    zoom_current: f32 = 1.0,
 
     prng: std.Random.DefaultPrng,
     players: [3]f.Player,
@@ -86,9 +144,9 @@ pub const TriangleApp = struct {
         app_state.simulation = f.GameSimulation.init(app_state.allocator, app_state.prng.random(), &app_state.deck, &app_state.players) catch @panic("failed to initialize game simulation");
 
         // --- shader program ------------------------------------------------
-        const vert = glInitShader(vert_src, vert_src.len, p.GL_VERTEX_SHADER) catch @panic("vertex shader compilation failed");
-        const frag = glInitShader(frag_src, frag_src.len, p.GL_FRAGMENT_SHADER) catch @panic("fragment shader compilation failed");
-        app_state.tri_program = glLinkShaderProgram(vert, frag) catch @panic("shader program linking failed");
+        const vert = glInitShader(vert_src, vert_src.len, p.GL_VERTEX_SHADER) catch std.debug.panic("vertex shader compilation failed", .{});
+        const frag = glInitShader(frag_src, frag_src.len, p.GL_FRAGMENT_SHADER) catch std.debug.panic("fragment shader compilation failed", .{});
+        app_state.tri_program = glLinkShaderProgram(vert, frag) catch std.debug.panic("shader program linking failed", .{});
 
         // --- geometry -------------------------------------------------------
         p.glGenVertexArrays(1, @as([*]u32, @ptrCast(&app_state.tri_vao)));
@@ -138,7 +196,9 @@ pub const TriangleApp = struct {
         p.glBindVertexArray(0);
 
         // --- texture -----------------------------------------------------------
-        app_state.card_texture = loadCardTexture(app_state.allocator, "cards/0.png") catch std.debug.panic("failed to load card texture", .{});
+        for (card_texture_paths, 0..) |path, i| {
+            app_state.card_textures[i] = loadCardTexture(app_state.allocator, path) catch std.debug.panic("failed to load card texture", .{});
+        }
 
         // Bind sampler uniform to texture unit 0, and cache uniform locations
         p.glUseProgram(app_state.tri_program);
@@ -210,6 +270,16 @@ pub const TriangleApp = struct {
         p.logInfo("onMouseUp: {} -> {} | {}", .{ button, x, y });
     }
 
+    pub fn onMouseWheel(delta: f32) void {
+        const factor: f32 = 1.15;
+        if (delta > 0) {
+            app_state.zoom_target *= std.math.pow(f32, factor, delta);
+        } else if (delta < 0) {
+            app_state.zoom_target /= std.math.pow(f32, factor, -delta);
+        }
+        app_state.zoom_target = std.math.clamp(app_state.zoom_target, 0.25, 10.0);
+    }
+
     pub fn onMouseMove(x: f32, y: f32) void {
         p.logInfo("onMouseMove: {} | {}", .{ x, y });
     }
@@ -223,45 +293,109 @@ pub const TriangleApp = struct {
         p.glClear(p.GL_COLOR_BUFFER_BIT);
 
         p.glUseProgram(app_state.tri_program);
-        p.glBindTexture(p.GL_TEXTURE_2D, app_state.card_texture);
         p.glBindVertexArray(app_state.tri_vao);
 
-        const world_to_view = zm.lookAtRh(
-            zm.f32x4(3.0, 3.0, 3.0, 1.0), // eye position
-            zm.f32x4(0.0, 0.0, 0.0, 1.0), // focus point
-            zm.f32x4(0.0, 1.0, 0.0, 0.0), // up direction ('w' coord is zero because this is a vector not a point)
-        );
-        p.glUniformMatrix4fv(app_state.u_loc_view, 1, p.GL_TRUE, zm.arrNPtr(&world_to_view));
+        // Orthographic top-down projection: X covers [-aspect, aspect], Y covers [-1, 1].
+        const identity = zm.identity();
+        p.glUniformMatrix4fv(app_state.u_loc_view, 1, p.GL_TRUE, zm.arrNPtr(&identity));
+        const ar = app_state.aspect_ratio;
+        // Smooth zoom: exponentially lerp zoom_current toward zoom_target each frame.
+        const lerp_speed: f32 = 0.18;
+        app_state.zoom_current += (app_state.zoom_target - app_state.zoom_current) * lerp_speed;
+        const half_w = ar / app_state.zoom_current;
+        const half_h = 1.0 / app_state.zoom_current;
+        const ortho = zm.orthographicOffCenterRh(-half_w, half_w, -half_h, half_h, -1.0, 1.0);
+        p.glUniformMatrix4fv(app_state.u_loc_projection, 1, p.GL_TRUE, zm.arrNPtr(&ortho));
 
-        const view_to_clip = zm.perspectiveFovRhGl(0.25 * std.math.pi, app_state.aspect_ratio, 0.1, 20.0);
-        p.glUniformMatrix4fv(app_state.u_loc_projection, 1, p.GL_TRUE, zm.arrNPtr(&view_to_clip));
+        // Card dimensions in world units.
+        const card_w: f32 = 0.12;
+        const card_h: f32 = 0.17;
+        const card_spacing: f32 = card_w * 1.1;
 
-        var instance_matrices = try std.ArrayList(zm.Mat).initCapacity(app_state.allocator, 0);
-        defer instance_matrices.deinit(app_state.allocator);
-        const positions = [4][2]f32{
-            .{ 0.0, 0.0 },
-            .{ 1.0, 0.0 },
-            .{ 1.0, 1.0 },
-            .{ 0.0, 1.0 },
-        };
-        for (positions) |pos| {
-            const object_to_world = zm.mul(
-                zm.translation(pos[0], pos[1], 0.0),
-                zm.scaling(0.5, 0.5, 0.5),
-            );
-            try instance_matrices.append(app_state.allocator, zm.transpose(object_to_world));
+        // One instance list per texture; we issue a separate draw call per texture.
+        var batches: [card_texture_paths.len]std.ArrayListUnmanaged(zm.Mat) = undefined;
+        for (&batches) |*b| {
+            b.* = .empty;
+        }
+        defer for (&batches) |*b| b.deinit(app_state.allocator);
+
+        // Build a card transform: position (cx, cy), rotation angle (radians CCW), size (cw x ch).
+        // Uses a 2-D TRS embedded in a 4x4 matrix.
+        const addCard = struct {
+            fn call(
+                alloc: std.mem.Allocator,
+                bs: *[card_texture_paths.len]std.ArrayListUnmanaged(zm.Mat),
+                tex_idx: usize,
+                cx: f32,
+                cy: f32,
+                angle: f32,
+                cw: f32,
+                ch: f32,
+            ) !void {
+                const cos_a = @cos(angle);
+                const sin_a = @sin(angle);
+                const m = zm.Mat{
+                    zm.f32x4(cos_a * cw, sin_a * cw, 0, 0),
+                    zm.f32x4(-sin_a * ch, cos_a * ch, 0, 0),
+                    zm.f32x4(0, 0, 1, 0),
+                    zm.f32x4(cx, cy, 0, 1),
+                };
+                try bs[tex_idx].append(alloc, zm.transpose(m));
+            }
+        }.call;
+
+        // Deck: single face-down card at the center.
+        try addCard(app_state.allocator, &batches, back_texture_index, 0.0, 0.0, 0.0, card_w, card_h);
+
+        // Players arranged in a circle.
+        const num_players = app_state.players.len;
+        const radius: f32 = 0.72;
+        for (app_state.players, 0..) |player, pi| {
+            // Spread players evenly; first player starts at the bottom.
+            const base_angle: f32 = -std.math.pi / 2.0 +
+                @as(f32, @floatFromInt(pi)) * (2.0 * std.math.pi / @as(f32, @floatFromInt(num_players)));
+
+            const px: f32 = radius * @cos(base_angle);
+            const py: f32 = radius * @sin(base_angle);
+
+            // Cards face inward (toward the center).
+            const card_angle: f32 = base_angle + std.math.pi;
+
+            // Perpendicular direction to spread cards in a row.
+            const perp_x: f32 = -@sin(base_angle);
+            const perp_y: f32 = @cos(base_angle);
+
+            const n = player.hand.items.len;
+            if (n == 0) {
+                continue;
+            }
+
+            const total_width: f32 = @as(f32, @floatFromInt(n - 1)) * card_spacing;
+            for (player.hand.items, 0..) |card, ci| {
+                const offset: f32 = -total_width / 2.0 + @as(f32, @floatFromInt(ci)) * card_spacing;
+                const cx = px + perp_x * offset;
+                const cy = py + perp_y * offset;
+                try addCard(app_state.allocator, &batches, cardTextureIndex(card), cx, cy, card_angle, card_w, card_h);
+            }
         }
 
-        p.glBindBuffer(p.GL_ARRAY_BUFFER, app_state.instance_vbo);
-        p.glBufferData(
-            p.GL_ARRAY_BUFFER,
-            instance_matrices.items.len * @sizeOf(zm.Mat),
-            instance_matrices.items.ptr,
-            p.GL_DYNAMIC_DRAW,
-        );
-        p.glBindBuffer(p.GL_ARRAY_BUFFER, 0);
+        // Issue one draw call per texture batch.
+        for (&batches, 0..) |*batch, ti| {
+            if (batch.items.len == 0) {
+                continue;
+            }
 
-        p.glDrawArraysInstanced(p.GL_TRIANGLES, 0, 6, @intCast(instance_matrices.items.len));
+            p.glBindTexture(p.GL_TEXTURE_2D, app_state.card_textures[ti]);
+            p.glBindBuffer(p.GL_ARRAY_BUFFER, app_state.instance_vbo);
+            p.glBufferData(
+                p.GL_ARRAY_BUFFER,
+                batch.items.len * @sizeOf(zm.Mat),
+                batch.items.ptr,
+                p.GL_DYNAMIC_DRAW,
+            );
+            p.glBindBuffer(p.GL_ARRAY_BUFFER, 0);
+            p.glDrawArraysInstanced(p.GL_TRIANGLES, 0, 6, @intCast(batch.items.len));
+        }
 
         p.glBindVertexArray(0);
         p.glBindTexture(p.GL_TEXTURE_2D, 0);

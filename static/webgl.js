@@ -200,6 +200,9 @@ function initWebGL(canvas, getString) {
   };
   const glDrawArrays = (type, offset, count) =>
     gl.drawArrays(type, offset, count);
+  const glDrawArraysInstanced = (mode, first, count, instanceCount) => {
+    gl.drawArraysInstanced(mode, first, count, instanceCount);
+  };
   const glCreateTexture = () => {
     glTextures.push(gl.createTexture());
     return glTextures.length - 1;
@@ -271,9 +274,33 @@ function initWebGL(canvas, getString) {
     }
   };
   const glBindVertexArray = (id) => gl.bindVertexArray(glVertexArrays[id]);
+  const glVertexAttribDivisor = (index, divisor) =>
+    gl.vertexAttribDivisor(index, divisor);
   const glGenerateMipmap = (target) => gl.generateMipmap(target);
   const glPixelStorei = (type, alignment) => gl.pixelStorei(type, alignment);
   const glGetError = () => gl.getError();
+  const glGetProgramInfoLog = (programId, logPtr, logLen) => {
+    const log = gl.getProgramInfoLog(glPrograms[programId]);
+    const encoder = new TextEncoder();
+    const encodedLog = encoder.encode(log);
+    const logArray = new Uint8Array(wasmMemory.buffer, logPtr, logLen);
+    logArray.set(encodedLog.slice(0, logLen));
+  };
+  const glGetShaderInfoLog = (shaderId, logPtr, logLen) => {
+    const log = gl.getShaderInfoLog(glShaders[shaderId]);
+    const encoder = new TextEncoder();
+    const encodedLog = encoder.encode(log);
+    const logArray = new Uint8Array(wasmMemory.buffer, logPtr, logLen);
+    logArray.set(encodedLog.slice(0, logLen));
+  };
+  const glGetProgramiv = (programId, pname, paramsPtr) => {
+    const params = new Int32Array(wasmMemory.buffer, paramsPtr, 1);
+    params[0] = gl.getProgramParameter(glPrograms[programId], pname);
+  };
+  const glGetShaderiv = (shaderId, pname, paramsPtr) => {
+    const params = new Int32Array(wasmMemory.buffer, paramsPtr, 1);
+    params[0] = gl.getShaderParameter(glShaders[shaderId], pname);
+  };
 
   return {
     glCreateProgram,
@@ -308,6 +335,7 @@ function initWebGL(canvas, getString) {
     glEnableVertexAttribArray,
     glVertexAttribPointer,
     glDrawArrays,
+    glDrawArraysInstanced,
     glCreateTexture,
     glGenTextures,
     glDeleteTextures,
@@ -321,7 +349,12 @@ function initWebGL(canvas, getString) {
     glGenVertexArrays,
     glDeleteVertexArrays,
     glBindVertexArray,
+    glVertexAttribDivisor,
     glPixelStorei,
     glGetError,
+    glGetProgramInfoLog,
+    glGetShaderInfoLog,
+    glGetProgramiv,
+    glGetShaderiv,
   };
 }
