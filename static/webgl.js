@@ -102,16 +102,18 @@ function initWebGL(canvas, getString) {
     );
     return glUniformLocations.length - 1;
   };
+  const glUniform1i = (locationId, x) =>
+    gl.uniform1i(glUniformLocations[locationId], x);
+  const glUniform1f = (locationId, x) =>
+    gl.uniform1f(glUniformLocations[locationId], x);
+  const glUniform2f = (locationId, x, y) =>
+    gl.uniform2f(glUniformLocations[locationId], x, y);
   const glUniform4f = (locationId, x, y, z, w) =>
     gl.uniform4fv(glUniformLocations[locationId], [x, y, z, w]);
   const glUniformMatrix4fv = (locationId, dataLen, transpose, dataPtr) => {
     const floats = new Float32Array(wasmMemory.buffer, dataPtr, dataLen * 16);
     gl.uniformMatrix4fv(glUniformLocations[locationId], transpose, floats);
   };
-  const glUniform1i = (locationId, x) =>
-    gl.uniform1i(glUniformLocations[locationId], x);
-  const glUniform1f = (locationId, x) =>
-    gl.uniform1f(glUniformLocations[locationId], x);
   const glCreateBuffer = () => {
     glBuffers.push(gl.createBuffer());
     return glBuffers.length - 1;
@@ -291,10 +293,11 @@ function initWebGL(canvas, getString) {
     glClear,
     glGetAttribLocation,
     glGetUniformLocation,
-    glUniform4f,
-    glUniformMatrix4fv,
     glUniform1i,
     glUniform1f,
+    glUniform2f,
+    glUniform4f,
+    glUniformMatrix4fv,
     glCreateBuffer,
     glGenBuffers,
     glDeleteBuffer,

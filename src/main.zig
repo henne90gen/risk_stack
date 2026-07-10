@@ -1,7 +1,8 @@
 const std = @import("std");
 const t = std.testing;
 
-const p = @import("platform.zig");
+pub const p = @import("platform.zig");
+const zm = @import("zmath");
 
 test {
     t.refAllDecls(@This());
@@ -34,27 +35,37 @@ const quad_vertices = [_]f32{
     -0.5, 0.5, 0.0, 0.0, // top-left
 };
 
-var tri_program: u32 = 0;
-var tri_vao: u32 = 0;
-var tri_vbo: u32 = 0;
-var card_texture: u32 = 0;
-var global_allocator: std.mem.Allocator = undefined;
+const AppState = struct {
+    allocator: std.mem.Allocator,
+
+    tri_program: u32 = 0,
+    tri_vao: u32 = 0,
+    tri_vbo: u32 = 0,
+    card_texture: u32 = 0,
+    u_loc_model: i32 = 0,
+    u_loc_view: i32 = 0,
+    u_loc_projection: i32 = 0,
+
+    aspect_ratio: f32 = 1.0,
+};
+
+var app_state: AppState = undefined;
 
 pub const TriangleApp = struct {
     pub fn onInit() void {
-        global_allocator = std.heap.page_allocator;
+        app_state = AppState{ .allocator = std.heap.page_allocator };
 
         // --- shader program ------------------------------------------------
         const vert = glInitShader(vert_src, vert_src.len, p.GL_VERTEX_SHADER);
         const frag = glInitShader(frag_src, frag_src.len, p.GL_FRAGMENT_SHADER);
-        tri_program = glLinkShaderProgram(vert, frag);
+        app_state.tri_program = glLinkShaderProgram(vert, frag);
 
         // --- geometry -------------------------------------------------------
-        p.glGenVertexArrays(1, @as([*]u32, @ptrCast(&tri_vao)));
-        p.glGenBuffers(1, @as([*]u32, @ptrCast(&tri_vbo)));
+        p.glGenVertexArrays(1, @as([*]u32, @ptrCast(&app_state.tri_vao)));
+        p.glGenBuffers(1, @as([*]u32, @ptrCast(&app_state.tri_vbo)));
 
-        p.glBindVertexArray(tri_vao);
-        p.glBindBuffer(p.GL_ARRAY_BUFFER, tri_vbo);
+        p.glBindVertexArray(app_state.tri_vao);
+        p.glBindBuffer(p.GL_ARRAY_BUFFER, app_state.tri_vbo);
         p.glBufferData(
             p.GL_ARRAY_BUFFER,
             @sizeOf(@TypeOf(quad_vertices)),
@@ -73,19 +84,54 @@ pub const TriangleApp = struct {
         p.glBindVertexArray(0);
 
         // --- texture -----------------------------------------------------------
-        card_texture = loadCardTexture(global_allocator, "cards/0.png") catch std.debug.panic("failed to load card texture", .{});
+        app_state.card_texture = loadCardTexture(app_state.allocator, "cards/0.png") catch std.debug.panic("failed to load card texture", .{});
 
-        // Bind sampler uniform to texture unit 0
-        p.glUseProgram(tri_program);
-        const loc = p.glGetUniformLocation(tri_program, "uTex\x00");
+        // Bind sampler uniform to texture unit 0, and cache uniform locations
+        p.glUseProgram(app_state.tri_program);
+
+        const loc = p.glGetUniformLocation(app_state.tri_program, "uTex");
         p.glUniform1i(loc, 0);
+
+        app_state.u_loc_model = p.glGetUniformLocation(app_state.tri_program, "uModel");
+        p.glUniformMatrix4fv(app_state.u_loc_model, 1, p.GL_TRUE, zm.arrNPtr(&zm.identity()));
+
+        app_state.u_loc_view = p.glGetUniformLocation(app_state.tri_program, "uView");
+        p.glUniformMatrix4fv(app_state.u_loc_view, 1, p.GL_TRUE, zm.arrNPtr(&zm.identity()));
+
+        app_state.u_loc_projection = p.glGetUniformLocation(app_state.tri_program, "uProjection");
+        p.glUniformMatrix4fv(app_state.u_loc_projection, 1, p.GL_TRUE, zm.arrNPtr(&zm.identity()));
+
         p.glUseProgram(0);
     }
 
+    // The game is designed for this logical aspect ratio (width / height).
+    const game_aspect: f32 = 16.0 / 9.0;
+
     pub fn onResize(w: c_uint, h: c_uint, scale: f32) void {
-        const w_: u32 = @intFromFloat(@round(scale * @as(f32, @floatFromInt(w))));
-        const h_: u32 = @intFromFloat(@round(scale * @as(f32, @floatFromInt(h))));
-        p.glViewport(0, 0, w_, h_);
+        p.logInfo("resizing to new dimensions {}x{} with scale {}", .{ w, h, scale });
+
+        const fw: f32 = @floatFromInt(w);
+        const fh: f32 = @floatFromInt(h);
+
+        // Pixel dimensions of the full canvas.
+        const pw: f32 = @round(fw * scale);
+        const ph: f32 = @round(fh * scale);
+
+        // Largest centered rectangle that fits the canvas at the desired ratio.
+        var vw: f32 = pw;
+        var vh: f32 = @round(vw / game_aspect);
+        if (vh > ph) {
+            vh = ph;
+            vw = @round(vh * game_aspect);
+        }
+
+        // Center it: offset from the bottom-left corner of the canvas.
+        const ox: i32 = @intFromFloat(@round((pw - vw) / 2.0));
+        const oy: i32 = @intFromFloat(@round((ph - vh) / 2.0));
+
+        p.glViewport(ox, oy, @intFromFloat(vw), @intFromFloat(vh));
+
+        app_state.aspect_ratio = vw / vh;
     }
 
     pub fn onKeyDown(key: p.Key) void {
@@ -116,15 +162,38 @@ pub const TriangleApp = struct {
         p.glClearColor(0.1, 0.1, 0.1, 1.0);
         p.glClear(p.GL_COLOR_BUFFER_BIT);
 
-        p.glUseProgram(tri_program);
+        p.glUseProgram(app_state.tri_program);
+        p.glBindTexture(p.GL_TEXTURE_2D, app_state.card_texture);
+        p.glBindVertexArray(app_state.tri_vao);
 
-        // Bind the card texture to unit 0
-        p.glBindTexture(p.GL_TEXTURE_2D, card_texture);
+        const positions = [4][2]f32{
+            .{ 0.0, 0.0 },
+            .{ 1.0, 0.0 },
+            .{ 1.0, 1.0 },
+            .{ 0.0, 1.0 },
+        };
 
-        p.glBindVertexArray(tri_vao);
-        p.glDrawArrays(p.GL_TRIANGLES, 0, 6);
+        const world_to_view = zm.lookAtRh(
+            zm.f32x4(3.0, 3.0, 3.0, 1.0), // eye position
+            zm.f32x4(0.0, 0.0, 0.0, 1.0), // focus point
+            zm.f32x4(0.0, 1.0, 0.0, 0.0), // up direction ('w' coord is zero because this is a vector not a point)
+        );
+        p.glUniformMatrix4fv(app_state.u_loc_view, 1, p.GL_TRUE, zm.arrNPtr(&world_to_view));
+
+        const view_to_clip = zm.perspectiveFovRhGl(0.25 * std.math.pi, app_state.aspect_ratio, 0.1, 20.0);
+        p.glUniformMatrix4fv(app_state.u_loc_projection, 1, p.GL_TRUE, zm.arrNPtr(&view_to_clip));
+
+        for (positions) |pos| {
+            const object_to_world = zm.mul(
+                zm.translation(pos[0], pos[1], 0.0),
+                zm.scaling(0.5, 0.5, 0.5),
+            );
+            p.glUniformMatrix4fv(app_state.u_loc_model, 1, p.GL_TRUE, zm.arrNPtr(&object_to_world));
+
+            p.glDrawArrays(p.GL_TRIANGLES, 0, 6);
+        }
+
         p.glBindVertexArray(0);
-
         p.glBindTexture(p.GL_TEXTURE_2D, 0);
         p.glUseProgram(0);
     }

@@ -55,17 +55,39 @@
                 // -----------------------------------------------------------------
 
                 const cardNames = [
-                    "0","1","2","3","4","5","6","7","8","9",
-                    "10","11","12",
-                    "flip_three","freeze",
-                    "plus_2","plus_4","plus_6","plus_8","plus_10",
-                    "second_chance","x2",
+                    "0",
+                    "1",
+                    "2",
+                    "3",
+                    "4",
+                    "5",
+                    "6",
+                    "7",
+                    "8",
+                    "9",
+                    "10",
+                    "11",
+                    "12",
+                    "flip_three",
+                    "freeze",
+                    "plus_2",
+                    "plus_4",
+                    "plus_6",
+                    "plus_8",
+                    "plus_10",
+                    "second_chance",
+                    "x2",
                 ];
 
                 // Decode one PNG URL to { width, height, pixels } via ImageBitmap + OffscreenCanvas.
                 async function decodeImage(url) {
                     const resp = await fetch(url);
-                    if (!resp.ok) throw new Error(`Failed to fetch ${url}: ${resp.status}`);
+                    if (!resp.ok) {
+                        throw new Error(
+                            `Failed to fetch ${url}: ${resp.status}`,
+                        );
+                    }
+
                     const blob = await resp.blob();
                     const bitmap = await createImageBitmap(blob);
                     const { width, height } = bitmap;
@@ -78,10 +100,12 @@
                 }
 
                 const textureCache = new Map();
-                await Promise.all(cardNames.map(async (name) => {
-                    const path = `cards/${name}.png`;
-                    textureCache.set(path, await decodeImage(path));
-                }));
+                await Promise.all(
+                    cardNames.map(async (name) => {
+                        const path = `cards/${name}.png`;
+                        textureCache.set(path, await decodeImage(path));
+                    }),
+                );
 
                 const env = {
                     logInfo(ptr, len) {
@@ -99,18 +123,39 @@
                     // out_width_ptr:          where to write image width  (u32, little-endian)
                     // out_height_ptr:         where to write image height (u32, little-endian)
                     // out_pixels_len_ptr:     where to write pixel byte count (usize = u32 on wasm32)
-                    getTexture(path_ptr, path_len, buf_ptr, buf_len, out_width_ptr, out_height_ptr, out_pixels_len_ptr) {
+                    getTexture(
+                        path_ptr,
+                        path_len,
+                        buf_ptr,
+                        buf_len,
+                        out_width_ptr,
+                        out_height_ptr,
+                        out_pixels_len_ptr,
+                    ) {
                         const path = getString(path_ptr, path_len);
                         const entry = textureCache.get(path);
-                        if (!entry) throw new Error(`getTexture: unknown path '${path}'`);
+                        if (!entry) {
+                            throw new Error(
+                                `getTexture: unknown path '${path}'`,
+                            );
+                        }
+
                         const { width, height, pixels } = entry;
-                        if (pixels.length > buf_len)
-                            throw new Error(`getTexture: buffer too small for '${path}' (need ${pixels.length}, got ${buf_len})`);
-                        new Uint8Array(wasmMemory.buffer, buf_ptr, pixels.length).set(pixels);
+                        if (pixels.length > buf_len) {
+                            throw new Error(
+                                `getTexture: buffer too small for '${path}' (need ${pixels.length}, got ${buf_len})`,
+                            );
+                        }
+
+                        new Uint8Array(
+                            wasmMemory.buffer,
+                            buf_ptr,
+                            pixels.length,
+                        ).set(pixels);
                         const dv = new DataView(wasmMemory.buffer);
-                        dv.setUint32(out_width_ptr,      width,          true);
-                        dv.setUint32(out_height_ptr,     height,         true);
-                        dv.setUint32(out_pixels_len_ptr, pixels.length,  true);
+                        dv.setUint32(out_width_ptr, width, true);
+                        dv.setUint32(out_height_ptr, height, true);
+                        dv.setUint32(out_pixels_len_ptr, pixels.length, true);
                     },
 
                     ...webgl,
@@ -120,7 +165,10 @@
                 // Load and instantiate the Wasm module
                 // -------------------------------------------------------------------------
 
-                const response = await fetch("flip7.wasm");
+                console.log("Loading flip7.wasm...");
+                const response = await fetch("flip7.wasm", {
+                    cache: "no-store",
+                });
                 const { instance } = await WebAssembly.instantiateStreaming(
                     response,
                     { env },
@@ -137,19 +185,6 @@
                     onMouseMove,
                     onAnimationFrame,
                 } = instance.exports;
-
-                function resize() {
-                    const dpr = window.devicePixelRatio || 1;
-                    const w = canvas.clientWidth;
-                    const h = canvas.clientHeight;
-                    const pw = Math.round(w * dpr);
-                    const ph = Math.round(h * dpr);
-                    if (canvas.width !== pw || canvas.height !== ph) {
-                        canvas.width = pw;
-                        canvas.height = ph;
-                        onResize(w, h, dpr);
-                    }
-                }
 
                 window.addEventListener("keydown", (e) => {
                     onKeyDown(e.keyCode);
@@ -171,22 +206,21 @@
                 // Init and run loop
                 // -------------------------------------------------------------------------
 
-                // Force an initial resize so onResize/glViewport is called
-                // even when clientWidth/clientHeight haven't changed yet.
-                {
+                onInit();
+
+                function resize() {
                     const dpr = window.devicePixelRatio || 1;
                     const w = canvas.clientWidth;
                     const h = canvas.clientHeight;
-                    canvas.width = Math.round(w * dpr);
-                    canvas.height = Math.round(h * dpr);
+                    const pw = Math.round(w * dpr);
+                    const ph = Math.round(h * dpr);
+                    canvas.width = pw;
+                    canvas.height = ph;
                     onResize(w, h, dpr);
                 }
-                onInit();
-
                 new ResizeObserver(resize).observe(canvas);
 
                 function frame() {
-                    resize();
                     onAnimationFrame();
                     requestAnimationFrame(frame);
                 }

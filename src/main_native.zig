@@ -1,10 +1,7 @@
-const std = @import("std");
-
-const platform = @import("platform.zig");
-const TriangleApp = @import("main.zig").TriangleApp;
+const m = @import("main");
 
 pub fn main() !void {
     if (comptime @import("builtin").target.cpu.arch != .wasm32) {
-        platform.run(TriangleApp);
+        m.p.run(m.TriangleApp);
     }
 }

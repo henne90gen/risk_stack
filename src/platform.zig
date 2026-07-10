@@ -90,6 +90,9 @@ const wasm = if (is_wasm) struct {
     extern fn glLinkProgram(program: u32) void;
     extern fn glUseProgram(program: u32) void;
     extern fn glGetUniformLocation(program: u32, name: [*]const u8, len: i32) i32;
+    extern fn glUniform1i(loc: i32, v: i32) void;
+    extern fn glUniform1f(loc: i32, v: f32) void;
+    extern fn glUniform2f(loc: i32, x: f32, y: f32) void;
     extern fn glUniform4f(loc: i32, x: f32, y: f32, z: f32, w: f32) void;
     extern fn glUniformMatrix4fv(loc: i32, count: i32, transpose: u32, data: [*]const f32) void;
     extern fn glDeleteShader(shader: u32) void;
@@ -98,7 +101,6 @@ const wasm = if (is_wasm) struct {
     extern fn glGenVertexArrays(n: i32, arrays: [*]u32) void;
     extern fn glBindVertexArray(array: u32) void;
     extern fn glDeleteVertexArrays(n: i32, arrays: [*]const u32) void;
-    extern fn glUniform1i(loc: i32, v: i32) void;
     extern fn glGenTextures(n: i32, textures: [*]u32) void;
     extern fn glBindTexture(target: u32, texture: u32) void;
     extern fn glTexImage2D(target: u32, level: i32, internal_format: i32, width: i32, height: i32, border: i32, format: u32, typ: u32, data: ?*const anyopaque, data_len: usize) void;
@@ -155,12 +157,14 @@ const GlProcs = if (!is_wasm) struct {
     LinkProgram: *const fn (c.GLuint) callconv(.c) void,
     UseProgram: *const fn (c.GLuint) callconv(.c) void,
     GetUniformLocation: *const fn (c.GLuint, [*c]const c.GLchar) callconv(.c) c.GLint,
+    Uniform1i: *const fn (c.GLint, c.GLint) callconv(.c) void,
+    Uniform1f: *const fn (c.GLint, c.GLfloat) callconv(.c) void,
+    Uniform2f: *const fn (c.GLint, c.GLfloat, c.GLfloat) callconv(.c) void,
     Uniform4f: *const fn (c.GLint, c.GLfloat, c.GLfloat, c.GLfloat, c.GLfloat) callconv(.c) void,
     UniformMatrix4fv: *const fn (c.GLint, c.GLsizei, c.GLboolean, [*c]const c.GLfloat) callconv(.c) void,
     DeleteShader: *const fn (c.GLuint) callconv(.c) void,
     DeleteProgram: *const fn (c.GLuint) callconv(.c) void,
     DeleteBuffers: *const fn (c.GLsizei, [*c]const c.GLuint) callconv(.c) void,
-    Uniform1i: *const fn (c.GLint, c.GLint) callconv(.c) void,
     GenTextures: *const fn (c.GLsizei, [*c]c.GLuint) callconv(.c) void,
     BindTexture: *const fn (c.GLenum, c.GLuint) callconv(.c) void,
     TexImage2D: *const fn (c.GLenum, c.GLint, c.GLint, c.GLsizei, c.GLsizei, c.GLint, c.GLenum, c.GLenum, ?*const anyopaque) callconv(.c) void,
@@ -197,12 +201,14 @@ pub fn loadProcs() void {
         .LinkProgram = @ptrCast(proc("glLinkProgram")),
         .UseProgram = @ptrCast(proc("glUseProgram")),
         .GetUniformLocation = @ptrCast(proc("glGetUniformLocation")),
+        .Uniform1i = @ptrCast(proc("glUniform1i")),
+        .Uniform1f = @ptrCast(proc("glUniform1f")),
+        .Uniform2f = @ptrCast(proc("glUniform2f")),
         .Uniform4f = @ptrCast(proc("glUniform4f")),
         .UniformMatrix4fv = @ptrCast(proc("glUniformMatrix4fv")),
         .DeleteShader = @ptrCast(proc("glDeleteShader")),
         .DeleteProgram = @ptrCast(proc("glDeleteProgram")),
         .DeleteBuffers = @ptrCast(proc("glDeleteBuffers")),
-        .Uniform1i = @ptrCast(proc("glUniform1i")),
         .GenTextures = @ptrCast(proc("glGenTextures")),
         .BindTexture = @ptrCast(proc("glBindTexture")),
         .TexImage2D = @ptrCast(proc("glTexImage2D")),
@@ -324,6 +330,18 @@ pub fn glGetUniformLocation(program: u32, name: [*:0]const u8) i32 {
     }
 }
 
+pub fn glUniform1i(loc: i32, v: i32) void {
+    if (is_wasm) wasm.glUniform1i(loc, v) else gl_procs.Uniform1i(loc, v);
+}
+
+pub fn glUniform1f(loc: i32, v: f32) void {
+    if (is_wasm) wasm.glUniform1f(loc, v) else gl_procs.Uniform1f(loc, v);
+}
+
+pub fn glUniform2f(loc: i32, x: f32, y: f32) void {
+    if (is_wasm) wasm.glUniform2f(loc, x, y) else gl_procs.Uniform2f(loc, x, y);
+}
+
 pub fn glUniform4f(loc: i32, x: f32, y: f32, z: f32, w: f32) void {
     if (is_wasm) wasm.glUniform4f(loc, x, y, z, w) else gl_procs.Uniform4f(loc, x, y, z, w);
 }
@@ -346,10 +364,6 @@ pub fn glDeleteProgram(program: u32) void {
 
 pub fn glDeleteBuffers(n: i32, buffers: [*]const u32) void {
     if (is_wasm) wasm.glDeleteBuffers(n, buffers) else gl_procs.DeleteBuffers(@intCast(n), @ptrCast(buffers));
-}
-
-pub fn glUniform1i(loc: i32, v: i32) void {
-    if (is_wasm) wasm.glUniform1i(loc, v) else gl_procs.Uniform1i(loc, v);
 }
 
 pub fn glGenTextures(n: i32, textures: [*]u32) void {

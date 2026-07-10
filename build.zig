@@ -1,5 +1,16 @@
 const std = @import("std");
 
+fn core(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const zmath_dep = b.dependency("zmath", .{});
+    const core_mod = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .root_source_file = b.path("src/main.zig"),
+    });
+    core_mod.addImport("zmath", zmath_dep.module("root"));
+    return core_mod;
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -92,6 +103,7 @@ pub fn build(b: *std.Build) void {
         exe_mod.addIncludePath(libpng_dep.path("."));
         exe_mod.addIncludePath(zlib_dep.path("."));
         exe_mod.addIncludePath(pnglibconf_h.dirname());
+        exe_mod.addImport("main", core(b, target, optimize));
 
         const exe = b.addExecutable(.{
             .name = "flip7",
@@ -121,6 +133,8 @@ pub fn build(b: *std.Build) void {
             .target = wasm_target,
             .optimize = optimize,
         });
+        wasm_mod.addImport("main", core(b, wasm_target, optimize));
+
         const wasm_exe = b.addExecutable(.{
             .name = "flip7",
             .root_module = wasm_mod,
