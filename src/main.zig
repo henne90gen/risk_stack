@@ -41,8 +41,9 @@ const AppState = struct {
     tri_program: u32 = 0,
     tri_vao: u32 = 0,
     tri_vbo: u32 = 0,
+    instance_vbo: u32 = 0,
     card_texture: u32 = 0,
-    u_loc_model: i32 = 0,
+    u_loc_texture: i32 = 0,
     u_loc_view: i32 = 0,
     u_loc_projection: i32 = 0,
 
@@ -81,6 +82,30 @@ pub const TriangleApp = struct {
         p.glEnableVertexAttribArray(1);
         p.glVertexAttribPointer(1, 2, p.GL_FLOAT, p.GL_FALSE, stride, @ptrFromInt(2 * @sizeOf(f32)));
 
+        // --- instance VBO (model matrices, per-instance) --------------------
+        p.glGenBuffers(1, @as([*]u32, @ptrCast(&app_state.instance_vbo)));
+        p.glBindBuffer(p.GL_ARRAY_BUFFER, app_state.instance_vbo);
+        p.glBufferData(p.GL_ARRAY_BUFFER, 0, null, p.GL_DYNAMIC_DRAW);
+
+        // A mat4 takes up 4 consecutive vec4 attribute slots (locations 2–5).
+        p.glBindVertexArray(app_state.tri_vao);
+        const mat_stride: i32 = @sizeOf(zm.Mat);
+        inline for (0..4) |col| {
+            const slot: u32 = 2 + col;
+            p.glEnableVertexAttribArray(slot);
+            p.glVertexAttribPointer(
+                slot,
+                4,
+                p.GL_FLOAT,
+                p.GL_FALSE,
+                mat_stride,
+                @ptrFromInt(col * @sizeOf(zm.Vec)),
+            );
+            // Advance the attribute once per instance, not per vertex.
+            p.glVertexAttribDivisor(slot, 1);
+        }
+        p.glBindBuffer(p.GL_ARRAY_BUFFER, 0);
+
         p.glBindVertexArray(0);
 
         // --- texture -----------------------------------------------------------
@@ -89,11 +114,8 @@ pub const TriangleApp = struct {
         // Bind sampler uniform to texture unit 0, and cache uniform locations
         p.glUseProgram(app_state.tri_program);
 
-        const loc = p.glGetUniformLocation(app_state.tri_program, "uTex");
-        p.glUniform1i(loc, 0);
-
-        app_state.u_loc_model = p.glGetUniformLocation(app_state.tri_program, "uModel");
-        p.glUniformMatrix4fv(app_state.u_loc_model, 1, p.GL_TRUE, zm.arrNPtr(&zm.identity()));
+        app_state.u_loc_texture = p.glGetUniformLocation(app_state.tri_program, "uTexture");
+        p.glUniform1i(app_state.u_loc_texture, 0);
 
         app_state.u_loc_view = p.glGetUniformLocation(app_state.tri_program, "uView");
         p.glUniformMatrix4fv(app_state.u_loc_view, 1, p.GL_TRUE, zm.arrNPtr(&zm.identity()));
@@ -159,6 +181,12 @@ pub const TriangleApp = struct {
     }
 
     pub fn onAnimationFrame() void {
+        render() catch |err| {
+            p.logErr("render failed: {}", .{err});
+        };
+    }
+
+    fn render() !void {
         p.glClearColor(0.1, 0.1, 0.1, 1.0);
         p.glClear(p.GL_COLOR_BUFFER_BIT);
 
@@ -183,15 +211,26 @@ pub const TriangleApp = struct {
         const view_to_clip = zm.perspectiveFovRhGl(0.25 * std.math.pi, app_state.aspect_ratio, 0.1, 20.0);
         p.glUniformMatrix4fv(app_state.u_loc_projection, 1, p.GL_TRUE, zm.arrNPtr(&view_to_clip));
 
+        var instance_matrices = try std.ArrayList(zm.Mat).initCapacity(app_state.allocator, 0);
+        defer instance_matrices.deinit(app_state.allocator);
         for (positions) |pos| {
             const object_to_world = zm.mul(
                 zm.translation(pos[0], pos[1], 0.0),
                 zm.scaling(0.5, 0.5, 0.5),
             );
-            p.glUniformMatrix4fv(app_state.u_loc_model, 1, p.GL_TRUE, zm.arrNPtr(&object_to_world));
-
-            p.glDrawArrays(p.GL_TRIANGLES, 0, 6);
+            try instance_matrices.append(app_state.allocator, zm.transpose(object_to_world));
         }
+
+        p.glBindBuffer(p.GL_ARRAY_BUFFER, app_state.instance_vbo);
+        p.glBufferData(
+            p.GL_ARRAY_BUFFER,
+            instance_matrices.items.len * @sizeOf(zm.Mat),
+            instance_matrices.items.ptr,
+            p.GL_DYNAMIC_DRAW,
+        );
+        p.glBindBuffer(p.GL_ARRAY_BUFFER, 0);
+
+        p.glDrawArraysInstanced(p.GL_TRIANGLES, 0, 6, @intCast(instance_matrices.items.len));
 
         p.glBindVertexArray(0);
         p.glBindTexture(p.GL_TEXTURE_2D, 0);

@@ -41,6 +41,7 @@ pub const GL_VERTEX_SHADER: u32 = 0x8B31;
 pub const GL_FRAGMENT_SHADER: u32 = 0x8B30;
 pub const GL_ARRAY_BUFFER: u32 = 0x8892;
 pub const GL_STATIC_DRAW: u32 = 0x88E4;
+pub const GL_DYNAMIC_DRAW: u32 = 0x88E8;
 pub const GL_FLOAT: u32 = 0x1406;
 pub const GL_FALSE: u32 = 0;
 pub const GL_TRUE: u32 = 1;
@@ -80,6 +81,8 @@ const wasm = if (is_wasm) struct {
     extern fn glBindBuffer(target: u32, buffer: u32) void;
     extern fn glBufferData(target: u32, size: usize, data: ?*const anyopaque, usage: u32) void;
     extern fn glDrawArrays(mode: u32, first: i32, count: i32) void;
+    extern fn glDrawArraysInstanced(mode: u32, first: i32, count: i32, instance_count: i32) void;
+    extern fn glVertexAttribDivisor(index: u32, divisor: u32) void;
     extern fn glEnableVertexAttribArray(index: u32) void;
     extern fn glVertexAttribPointer(index: u32, size: i32, typ: u32, normalized: u32, stride: i32, offset: ?*const anyopaque) void;
     extern fn glCreateShader(typ: u32) u32;
@@ -144,6 +147,8 @@ const GlProcs = if (!is_wasm) struct {
     BindBuffer: *const fn (c.GLenum, c.GLuint) callconv(.c) void,
     BufferData: *const fn (c.GLenum, c.GLsizeiptr, ?*const anyopaque, c.GLenum) callconv(.c) void,
     DrawArrays: *const fn (c.GLenum, c.GLint, c.GLsizei) callconv(.c) void,
+    DrawArraysInstanced: *const fn (c.GLenum, c.GLint, c.GLsizei, c.GLsizei) callconv(.c) void,
+    VertexAttribDivisor: *const fn (c.GLuint, c.GLuint) callconv(.c) void,
     EnableVertexAttribArray: *const fn (c.GLuint) callconv(.c) void,
     VertexAttribPointer: *const fn (c.GLuint, c.GLint, c.GLenum, c.GLboolean, c.GLsizei, ?*const anyopaque) callconv(.c) void,
     GenVertexArrays: *const fn (c.GLsizei, [*c]c.GLuint) callconv(.c) void,
@@ -188,6 +193,8 @@ pub fn loadProcs() void {
         .BindBuffer = @ptrCast(proc("glBindBuffer")),
         .BufferData = @ptrCast(proc("glBufferData")),
         .DrawArrays = @ptrCast(proc("glDrawArrays")),
+        .DrawArraysInstanced = @ptrCast(proc("glDrawArraysInstanced")),
+        .VertexAttribDivisor = @ptrCast(proc("glVertexAttribDivisor")),
         .EnableVertexAttribArray = @ptrCast(proc("glEnableVertexAttribArray")),
         .VertexAttribPointer = @ptrCast(proc("glVertexAttribPointer")),
         .GenVertexArrays = @ptrCast(proc("glGenVertexArrays")),
@@ -260,6 +267,14 @@ pub fn glBufferData(target: u32, size: usize, data: ?*const anyopaque, usage: u3
 
 pub fn glDrawArrays(mode: u32, first: i32, count: i32) void {
     if (is_wasm) wasm.glDrawArrays(mode, first, count) else gl_procs.DrawArrays(@intCast(mode), first, count);
+}
+
+pub fn glDrawArraysInstanced(mode: u32, first: i32, count: i32, instance_count: i32) void {
+    if (is_wasm) wasm.glDrawArraysInstanced(mode, first, count, instance_count) else gl_procs.DrawArraysInstanced(@intCast(mode), first, count, instance_count);
+}
+
+pub fn glVertexAttribDivisor(index: u32, divisor: u32) void {
+    if (is_wasm) wasm.glVertexAttribDivisor(index, divisor) else gl_procs.VertexAttribDivisor(@intCast(index), @intCast(divisor));
 }
 
 pub fn glEnableVertexAttribArray(index: u32) void {
@@ -509,12 +524,15 @@ fn validateApp(comptime App: type) void {
     inline for (required) |entry| {
         const name = entry[0];
         const Sig = entry[1];
-        if (!@hasDecl(App, name))
+        if (!@hasDecl(App, name)) {
             @compileError("App must declare `pub fn " ++ name ++ "`");
+        }
+
         const actual = @TypeOf(@field(App, name));
-        if (actual != Sig)
+        if (actual != Sig) {
             @compileError("App." ++ name ++ " has wrong signature: expected " ++
                 @typeName(Sig) ++ ", got " ++ @typeName(actual));
+        }
     }
 }
 
