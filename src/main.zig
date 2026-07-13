@@ -90,9 +90,28 @@ fn cardTextureIndex(card: f.Card) usize {
     };
 }
 
-const AppState = struct {
-    allocator: std.mem.Allocator,
+const ZoomState = struct {
+    target: f32 = 1.0,
+    current: f32 = 1.0,
 
+    fn update_target(self: *ZoomState, delta: f32) void {
+        const factor: f32 = 1.15;
+        if (delta > 0) {
+            self.target *= std.math.pow(f32, factor, delta);
+        } else if (delta < 0) {
+            self.target /= std.math.pow(f32, factor, -delta);
+        }
+        self.target = std.math.clamp(self.target, 0.25, 10.0);
+    }
+
+    fn update_current(self: *ZoomState) void {
+        // Smooth zoom: exponentially lerp zoom_current toward zoom_target each frame.
+        const lerp_speed: f32 = 0.18;
+        self.current += (self.target - self.current) * lerp_speed;
+    }
+};
+
+const OpenGLState = struct {
     tri_program: u32 = 0,
     tri_vao: u32 = 0,
     tri_vbo: u32 = 0,
@@ -101,14 +120,24 @@ const AppState = struct {
     u_loc_texture: i32 = 0,
     u_loc_view: i32 = 0,
     u_loc_projection: i32 = 0,
+};
 
+const AnimationState = union(enum) {
+    none: struct {},
+    deal_card: struct {
+        t: f32,
+        // deck_pos: [2]f32,
+        // player_pos: [2]f32,
+        player: *f.Player,
+    },
+};
+
+const AppState = struct {
+    allocator: std.mem.Allocator,
     aspect_ratio: f32 = 1.0,
-
-    // --- zoom state ----------------------------------------
-    // zoom_target is updated immediately on scroll events; zoom_current
-    // follows it smoothly via exponential lerp each frame.
-    zoom_target: f32 = 1.0,
-    zoom_current: f32 = 1.0,
+    gl: OpenGLState = .{},
+    zoom: ZoomState = .{},
+    animation: AnimationState = .{ .none = .{} },
 
     prng: std.Random.DefaultPrng,
     players: [3]f.Player,
@@ -146,14 +175,14 @@ pub const TriangleApp = struct {
         // --- shader program ------------------------------------------------
         const vert = glInitShader(vert_src, vert_src.len, p.GL_VERTEX_SHADER) catch std.debug.panic("vertex shader compilation failed", .{});
         const frag = glInitShader(frag_src, frag_src.len, p.GL_FRAGMENT_SHADER) catch std.debug.panic("fragment shader compilation failed", .{});
-        app_state.tri_program = glLinkShaderProgram(vert, frag) catch std.debug.panic("shader program linking failed", .{});
+        app_state.gl.tri_program = glLinkShaderProgram(vert, frag) catch std.debug.panic("shader program linking failed", .{});
 
         // --- geometry -------------------------------------------------------
-        p.glGenVertexArrays(1, @as([*]u32, @ptrCast(&app_state.tri_vao)));
-        p.glGenBuffers(1, @as([*]u32, @ptrCast(&app_state.tri_vbo)));
+        p.glGenVertexArrays(1, @as([*]u32, @ptrCast(&app_state.gl.tri_vao)));
+        p.glGenBuffers(1, @as([*]u32, @ptrCast(&app_state.gl.tri_vbo)));
 
-        p.glBindVertexArray(app_state.tri_vao);
-        p.glBindBuffer(p.GL_ARRAY_BUFFER, app_state.tri_vbo);
+        p.glBindVertexArray(app_state.gl.tri_vao);
+        p.glBindBuffer(p.GL_ARRAY_BUFFER, app_state.gl.tri_vbo);
         p.glBufferData(
             p.GL_ARRAY_BUFFER,
             @sizeOf(@TypeOf(quad_vertices)),
@@ -170,12 +199,12 @@ pub const TriangleApp = struct {
         p.glVertexAttribPointer(1, 2, p.GL_FLOAT, p.GL_FALSE, stride, @ptrFromInt(2 * @sizeOf(f32)));
 
         // --- instance VBO (model matrices, per-instance) --------------------
-        p.glGenBuffers(1, @as([*]u32, @ptrCast(&app_state.instance_vbo)));
-        p.glBindBuffer(p.GL_ARRAY_BUFFER, app_state.instance_vbo);
+        p.glGenBuffers(1, @as([*]u32, @ptrCast(&app_state.gl.instance_vbo)));
+        p.glBindBuffer(p.GL_ARRAY_BUFFER, app_state.gl.instance_vbo);
         p.glBufferData(p.GL_ARRAY_BUFFER, 0, null, p.GL_DYNAMIC_DRAW);
 
         // A mat4 takes up 4 consecutive vec4 attribute slots (locations 2–5).
-        p.glBindVertexArray(app_state.tri_vao);
+        p.glBindVertexArray(app_state.gl.tri_vao);
         const mat_stride: i32 = @sizeOf(zm.Mat);
         inline for (0..4) |col| {
             const slot: u32 = 2 + col;
@@ -197,20 +226,20 @@ pub const TriangleApp = struct {
 
         // --- texture -----------------------------------------------------------
         for (card_texture_paths, 0..) |path, i| {
-            app_state.card_textures[i] = loadCardTexture(app_state.allocator, path) catch std.debug.panic("failed to load card texture", .{});
+            app_state.gl.card_textures[i] = loadCardTexture(app_state.allocator, path) catch std.debug.panic("failed to load card texture", .{});
         }
 
         // Bind sampler uniform to texture unit 0, and cache uniform locations
-        p.glUseProgram(app_state.tri_program);
+        p.glUseProgram(app_state.gl.tri_program);
 
-        app_state.u_loc_texture = p.glGetUniformLocation(app_state.tri_program, "uTexture");
-        p.glUniform1i(app_state.u_loc_texture, 0);
+        app_state.gl.u_loc_texture = p.glGetUniformLocation(app_state.gl.tri_program, "uTexture");
+        p.glUniform1i(app_state.gl.u_loc_texture, 0);
 
-        app_state.u_loc_view = p.glGetUniformLocation(app_state.tri_program, "uView");
-        p.glUniformMatrix4fv(app_state.u_loc_view, 1, p.GL_TRUE, zm.arrNPtr(&zm.identity()));
+        app_state.gl.u_loc_view = p.glGetUniformLocation(app_state.gl.tri_program, "uView");
+        p.glUniformMatrix4fv(app_state.gl.u_loc_view, 1, p.GL_TRUE, zm.arrNPtr(&zm.identity()));
 
-        app_state.u_loc_projection = p.glGetUniformLocation(app_state.tri_program, "uProjection");
-        p.glUniformMatrix4fv(app_state.u_loc_projection, 1, p.GL_TRUE, zm.arrNPtr(&zm.identity()));
+        app_state.gl.u_loc_projection = p.glGetUniformLocation(app_state.gl.tri_program, "uProjection");
+        p.glUniformMatrix4fv(app_state.gl.u_loc_projection, 1, p.GL_TRUE, zm.arrNPtr(&zm.identity()));
 
         p.glUseProgram(0);
     }
@@ -271,17 +300,13 @@ pub const TriangleApp = struct {
     }
 
     pub fn onMouseWheel(delta: f32) void {
-        const factor: f32 = 1.15;
-        if (delta > 0) {
-            app_state.zoom_target *= std.math.pow(f32, factor, delta);
-        } else if (delta < 0) {
-            app_state.zoom_target /= std.math.pow(f32, factor, -delta);
-        }
-        app_state.zoom_target = std.math.clamp(app_state.zoom_target, 0.25, 10.0);
+        app_state.zoom.update_target(delta);
     }
 
     pub fn onMouseMove(x: f32, y: f32) void {
-        p.logInfo("onMouseMove: {} | {}", .{ x, y });
+        _ = x;
+        _ = y;
+        // p.logInfo("onMouseMove: {} | {}", .{ x, y });
     }
 
     pub fn onAnimationFrame() void {
@@ -292,25 +317,24 @@ pub const TriangleApp = struct {
         p.glClearColor(0.1, 0.1, 0.1, 1.0);
         p.glClear(p.GL_COLOR_BUFFER_BIT);
 
-        p.glUseProgram(app_state.tri_program);
-        p.glBindVertexArray(app_state.tri_vao);
+        p.glUseProgram(app_state.gl.tri_program);
+        p.glBindVertexArray(app_state.gl.tri_vao);
 
         // Orthographic top-down projection: X covers [-aspect, aspect], Y covers [-1, 1].
         const identity = zm.identity();
-        p.glUniformMatrix4fv(app_state.u_loc_view, 1, p.GL_TRUE, zm.arrNPtr(&identity));
+        p.glUniformMatrix4fv(app_state.gl.u_loc_view, 1, p.GL_TRUE, zm.arrNPtr(&identity));
         const ar = app_state.aspect_ratio;
-        // Smooth zoom: exponentially lerp zoom_current toward zoom_target each frame.
-        const lerp_speed: f32 = 0.18;
-        app_state.zoom_current += (app_state.zoom_target - app_state.zoom_current) * lerp_speed;
-        const half_w = ar / app_state.zoom_current;
-        const half_h = 1.0 / app_state.zoom_current;
+
+        app_state.zoom.update_current();
+        const half_w = ar / app_state.zoom.current;
+        const half_h = 1.0 / app_state.zoom.current;
         const ortho = zm.orthographicOffCenterRh(-half_w, half_w, -half_h, half_h, -1.0, 1.0);
-        p.glUniformMatrix4fv(app_state.u_loc_projection, 1, p.GL_TRUE, zm.arrNPtr(&ortho));
+        p.glUniformMatrix4fv(app_state.gl.u_loc_projection, 1, p.GL_TRUE, zm.arrNPtr(&ortho));
 
         // Card dimensions in world units.
         const card_w: f32 = 0.12;
         const card_h: f32 = 0.17;
-        const card_spacing: f32 = card_w * 1.1;
+        const card_spacing: f32 = card_h * 1.1;
 
         // One instance list per texture; we issue a separate draw call per texture.
         var batches: [card_texture_paths.len]std.ArrayListUnmanaged(zm.Mat) = undefined;
@@ -344,13 +368,23 @@ pub const TriangleApp = struct {
             }
         }.call;
 
+        switch (app_state.animation) {
+            .deal_card => |*data| {
+                data.t += 0.05;
+                if (data.t >= 1.0) {
+                    app_state.animation = .none;
+                }
+            },
+            .none => {},
+        }
+
         // Deck: single face-down card at the center.
         try addCard(app_state.allocator, &batches, back_texture_index, 0.0, 0.0, 0.0, card_w, card_h);
 
         // Players arranged in a circle.
         const num_players = app_state.players.len;
         const radius: f32 = 0.72;
-        for (app_state.players, 0..) |player, pi| {
+        for (&app_state.players, 0..) |*player, pi| {
             // Spread players evenly; first player starts at the bottom.
             const base_angle: f32 = -std.math.pi / 2.0 +
                 @as(f32, @floatFromInt(pi)) * (2.0 * std.math.pi / @as(f32, @floatFromInt(num_players)));
@@ -359,7 +393,7 @@ pub const TriangleApp = struct {
             const py: f32 = radius * @sin(base_angle);
 
             // Cards face inward (toward the center).
-            const card_angle: f32 = base_angle + std.math.pi;
+            var card_angle: f32 = base_angle + std.math.pi;
 
             // Perpendicular direction to spread cards in a row.
             const perp_x: f32 = -@sin(base_angle);
@@ -373,20 +407,33 @@ pub const TriangleApp = struct {
             const total_width: f32 = @as(f32, @floatFromInt(n - 1)) * card_spacing;
             for (player.hand.items, 0..) |card, ci| {
                 const offset: f32 = -total_width / 2.0 + @as(f32, @floatFromInt(ci)) * card_spacing;
-                const cx = px + perp_x * offset;
-                const cy = py + perp_y * offset;
+                var cx = px + perp_x * offset;
+                var cy = py + perp_y * offset;
+
+                switch (app_state.animation) {
+                    .deal_card => |data| {
+                        if (data.player == player and ci == player.hand.items.len - 1) {
+                            const result_pos = zm.lerp(zm.f32x4(0.0, 0.0, 0.0, 0.0), zm.f32x4(cx, cy, 0.0, 0.0), data.t);
+                            cx = result_pos[0];
+                            cy = result_pos[1];
+                            card_angle = std.math.lerp(0.0, card_angle, data.t);
+                        }
+                    },
+                    else => {},
+                }
+
                 try addCard(app_state.allocator, &batches, cardTextureIndex(card), cx, cy, card_angle, card_w, card_h);
             }
         }
 
-        // Issue one draw call per texture batch.
+        // Issue one draw call per texture batch
         for (&batches, 0..) |*batch, ti| {
             if (batch.items.len == 0) {
                 continue;
             }
 
-            p.glBindTexture(p.GL_TEXTURE_2D, app_state.card_textures[ti]);
-            p.glBindBuffer(p.GL_ARRAY_BUFFER, app_state.instance_vbo);
+            p.glBindTexture(p.GL_TEXTURE_2D, app_state.gl.card_textures[ti]);
+            p.glBindBuffer(p.GL_ARRAY_BUFFER, app_state.gl.instance_vbo);
             p.glBufferData(
                 p.GL_ARRAY_BUFFER,
                 batch.items.len * @sizeOf(zm.Mat),
@@ -412,6 +459,13 @@ pub const TriangleApp = struct {
                     app_state.next_event_to_process_index = app_state.simulation.events.items.len;
                     for (events) |event| {
                         p.logInfo("event: {}", .{event});
+                        switch (event) {
+                            .DrawCard => |data| {
+                                app_state.animation = .{ .deal_card = .{ .player = data.player, .t = 0.0 } };
+                                p.logInfo("created animation", .{});
+                            },
+                            else => {},
+                        }
                     }
                 }
             }
