@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const t = std.testing;
 
 const p = @import("platform.zig");
@@ -143,11 +144,13 @@ fn readCallback(
 var global_running: bool = false;
 
 pub fn run(comptime App: type) void {
-    // Prefer X11/XWayland over native Wayland: without server-side decorations
-    // (e.g. on GNOME) SDL falls back to libdecor, whose software-rendered
-    // decorations make interactive resizing extremely slow on large/HiDPI
-    // windows. The SDL_VIDEO_DRIVER env var still overrides this hint.
-    _ = c.SDL_SetHint(c.SDL_HINT_VIDEO_DRIVER, "x11,wayland");
+    if (builtin.target.os.tag == .linux) {
+        // Prefer X11/XWayland over native Wayland: without server-side decorations
+        // (e.g. on GNOME) SDL falls back to libdecor, whose software-rendered
+        // decorations make interactive resizing extremely slow on large/HiDPI
+        // windows. The SDL_VIDEO_DRIVER env var still overrides this hint.
+        _ = c.SDL_SetHint(c.SDL_HINT_VIDEO_DRIVER, "x11,wayland");
+    }
 
     if (!c.SDL_Init(c.SDL_INIT_VIDEO)) {
         p.logErr("SDL_Init failed: {s}", .{c.SDL_GetError()});
