@@ -30,6 +30,10 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_tests.step);
     }
 
+    const freetype_dep = b.dependency("freetype", .{});
+    const freetype = buildFreetype(b, target, optimize, freetype_dep);
+    b.installArtifact(freetype);
+
     { // game executable
         const sdl_dep = b.dependency("sdl", .{
             .target = target,
@@ -81,7 +85,11 @@ pub fn build(b: *std.Build) void {
         });
         libpng_mod.link_libc = true;
         libpng_mod.linkLibrary(zlib);
-        const libpng = b.addLibrary(.{ .name = "png", .root_module = libpng_mod });
+        const libpng = b.addLibrary(.{
+            .name = "png",
+            .root_module = libpng_mod,
+            .linkage = .static,
+        });
 
         // --- exe module ------------------------------------------------------
         const exe_mod = b.createModule(.{
@@ -91,9 +99,11 @@ pub fn build(b: *std.Build) void {
         });
         exe_mod.linkLibrary(sdl_lib);
         exe_mod.linkLibrary(libpng);
+        exe_mod.linkLibrary(freetype);
         exe_mod.addIncludePath(libpng_dep.path("."));
         exe_mod.addIncludePath(zlib_dep.path("."));
         exe_mod.addIncludePath(pnglibconf_h.dirname());
+        exe_mod.addIncludePath(freetype_dep.path("include"));
         exe_mod.addImport("zmath", zmath_dep.module("root"));
 
         const exe = b.addExecutable(.{
@@ -153,4 +163,105 @@ pub fn build(b: *std.Build) void {
 
         b.getInstallStep().dependOn(wasm_step);
     }
+}
+
+fn buildFreetype(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, lib_dep: *std.Build.Dependency) *std.Build.Step.Compile {
+    const lib_mod = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const flags: []const []const u8 = &.{
+        "-DFT2_BUILD_LIBRARY",
+        "-DFT_CONFIG_OPTION_SYSTEM_ZLIB=1",
+
+        "-DHAVE_UNISTD_H",
+        "-DHAVE_FCNTL_H",
+
+        "-fno-sanitize=undefined",
+    };
+    lib_mod.addCSourceFiles(.{
+        .root = lib_dep.path("src"),
+        .files = &.{
+            "autofit/autofit.c",
+            "base/ftbase.c",
+            "base/ftbbox.c",
+            "base/ftbdf.c",
+            "base/ftbitmap.c",
+            "base/ftcid.c",
+            "base/ftfstype.c",
+            "base/ftgasp.c",
+            "base/ftglyph.c",
+            "base/ftgxval.c",
+            "base/ftinit.c",
+            "base/ftmm.c",
+            "base/ftotval.c",
+            "base/ftpatent.c",
+            "base/ftpfr.c",
+            "base/ftstroke.c",
+            "base/ftsynth.c",
+            "base/fttype1.c",
+            "base/ftwinfnt.c",
+            "bdf/bdf.c",
+            "bzip2/ftbzip2.c",
+            "cache/ftcache.c",
+            "cff/cff.c",
+            "cid/type1cid.c",
+            "gzip/ftgzip.c",
+            "lzw/ftlzw.c",
+            "pcf/pcf.c",
+            "pfr/pfr.c",
+            "psaux/psaux.c",
+            "pshinter/pshinter.c",
+            "psnames/psnames.c",
+            "raster/raster.c",
+            "sdf/sdf.c",
+            "sfnt/sfnt.c",
+            "smooth/smooth.c",
+            "svg/svg.c",
+            "truetype/truetype.c",
+            "type1/type1.c",
+            "type42/type42.c",
+            "winfonts/winfnt.c",
+        },
+        .flags = flags,
+    });
+    lib_mod.addIncludePath(lib_dep.path("include"));
+    lib_mod.link_libc = true;
+
+    switch (target.result.os.tag) {
+        .linux => lib_mod.addCSourceFile(.{
+            .file = lib_dep.path("builds/unix/ftsystem.c"),
+            .flags = flags,
+        }),
+        .windows => lib_mod.addCSourceFile(.{
+            .file = lib_dep.path("builds/windows/ftsystem.c"),
+            .flags = flags,
+        }),
+        else => lib_mod.addCSourceFile(.{
+            .file = lib_dep.path("src/base/ftsystem.c"),
+            .flags = flags,
+        }),
+    }
+    switch (target.result.os.tag) {
+        .windows => {
+            lib_mod.addCSourceFile(.{
+                .file = lib_dep.path("builds/windows/ftdebug.c"),
+                .flags = flags,
+            });
+            lib_mod.addWin32ResourceFile(.{
+                .file = lib_dep.path("src/base/ftver.rc"),
+            });
+        },
+        else => lib_mod.addCSourceFile(.{
+            .file = lib_dep.path("src/base/ftdebug.c"),
+            .flags = flags,
+        }),
+    }
+
+    return b.addLibrary(.{
+        .name = "freetype",
+        .linkage = .static,
+        .root_module = lib_mod,
+    });
 }

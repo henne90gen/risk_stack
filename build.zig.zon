@@ -48,6 +48,10 @@
             .url = "git+https://github.com/zig-gamedev/zmath.git#9e42b04a24c970a297b365f3d3022f92dbf3219d",
             .hash = "zmath-0.11.0-dev-wjwivTwtAwDOjG2_KGP-HLtHrONfsFfHttalmxFAGVAK",
         },
+        .freetype = .{
+            .url = "git+https://gitlab.freedesktop.org/freetype/freetype.git#f01dec5e676847267834b881b25f6e8c79581163",
+            .hash = "N-V-__8AAPy_qwD2SmYF0SKugjxe01hTD3JnSj65i3fiO_mG",
+        },
     },
     .paths = .{
         "build.zig",

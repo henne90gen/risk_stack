@@ -5,6 +5,10 @@ pub const p = @import("platform.zig");
 const zm = @import("zmath");
 const f = @import("flip7.zig");
 
+const ft = @cImport({
+    @cInclude("freetype/freetype.h");
+});
+
 test {
     t.refAllDecls(@This());
 }
@@ -416,7 +420,12 @@ pub const TriangleApp = struct {
                             const result_pos = zm.lerp(zm.f32x4(0.0, 0.0, 0.0, 0.0), zm.f32x4(cx, cy, 0.0, 0.0), data.t);
                             cx = result_pos[0];
                             cy = result_pos[1];
-                            card_angle = std.math.lerp(0.0, card_angle, data.t);
+
+                            var start_angle: f32 = 0.0;
+                            if (card_angle > std.math.pi) {
+                                start_angle = std.math.pi * 2.0;
+                            }
+                            card_angle = std.math.lerp(start_angle, card_angle, data.t);
                         }
                     },
                     else => {},
@@ -472,6 +481,9 @@ pub const TriangleApp = struct {
         }
 
         app_state.resetInputTracking();
+
+        const bla = ft.Face{};
+        _ = bla;
     }
 };
 
