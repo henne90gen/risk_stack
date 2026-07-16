@@ -31,7 +31,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const freetype_dep = b.dependency("freetype", .{});
-    const freetype = buildFreetype(b, target, optimize, freetype_dep);
+    const freetype = buildFreetype(b, target, optimize, freetype_dep, false);
     b.installArtifact(freetype);
 
     { // game executable
@@ -128,6 +128,7 @@ pub fn build(b: *std.Build) void {
         const wasm_target = b.resolveTargetQuery(.{
             .cpu_arch = .wasm32,
             .os_tag = .freestanding,
+            .cpu_features_add = std.Target.wasm.featureSet(&.{.exception_handling}),
         });
 
         const wasm_mod = b.createModule(.{
@@ -136,6 +137,11 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         wasm_mod.addImport("zmath", zmath_dep.module("root"));
+        const freetype_wasm = buildFreetype(b, wasm_target, optimize, freetype_dep, true);
+        wasm_mod.linkLibrary(freetype_wasm);
+        wasm_mod.addIncludePath(freetype_dep.path("include"));
+        wasm_mod.addIncludePath(b.path("src"));
+        wasm_mod.addCMacro("FT_CONFIG_STANDARD_LIBRARY_H", "\"freetype_wasm_stdlib.h\"");
 
         const wasm_exe = b.addExecutable(.{
             .name = "flip7",
@@ -165,71 +171,94 @@ pub fn build(b: *std.Build) void {
     }
 }
 
-fn buildFreetype(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, lib_dep: *std.Build.Dependency) *std.Build.Step.Compile {
+fn buildFreetype(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, lib_dep: *std.Build.Dependency, wasm_no_libc: bool) *std.Build.Step.Compile {
     const lib_mod = b.createModule(.{
         .target = target,
         .optimize = optimize,
     });
 
-    const flags: []const []const u8 = &.{
+    const flags: []const []const u8 = if (wasm_no_libc) &.{
+        "-DFT2_BUILD_LIBRARY",
+        "-DFT_CONFIG_OPTION_SYSTEM_ZLIB=0",
+        "-DFT_CONFIG_OPTION_DISABLE_STREAM_SUPPORT",
+        "-DFT_CONFIG_STANDARD_LIBRARY_H=\"freetype_wasm_stdlib.h\"",
+        "-fwasm-exceptions",
+        "-fno-sanitize=undefined",
+    } else &.{
         "-DFT2_BUILD_LIBRARY",
         "-DFT_CONFIG_OPTION_SYSTEM_ZLIB=1",
-
         "-DHAVE_UNISTD_H",
         "-DHAVE_FCNTL_H",
-
         "-fno-sanitize=undefined",
     };
-    lib_mod.addCSourceFiles(.{
-        .root = lib_dep.path("src"),
-        .files = &.{
-            "autofit/autofit.c",
-            "base/ftbase.c",
-            "base/ftbbox.c",
-            "base/ftbdf.c",
-            "base/ftbitmap.c",
-            "base/ftcid.c",
-            "base/ftfstype.c",
-            "base/ftgasp.c",
-            "base/ftglyph.c",
-            "base/ftgxval.c",
-            "base/ftinit.c",
-            "base/ftmm.c",
-            "base/ftotval.c",
-            "base/ftpatent.c",
-            "base/ftpfr.c",
-            "base/ftstroke.c",
-            "base/ftsynth.c",
-            "base/fttype1.c",
-            "base/ftwinfnt.c",
-            "bdf/bdf.c",
-            "bzip2/ftbzip2.c",
-            "cache/ftcache.c",
-            "cff/cff.c",
-            "cid/type1cid.c",
-            "gzip/ftgzip.c",
-            "lzw/ftlzw.c",
-            "pcf/pcf.c",
-            "pfr/pfr.c",
-            "psaux/psaux.c",
-            "pshinter/pshinter.c",
-            "psnames/psnames.c",
-            "raster/raster.c",
-            "sdf/sdf.c",
-            "sfnt/sfnt.c",
-            "smooth/smooth.c",
-            "svg/svg.c",
-            "truetype/truetype.c",
-            "type1/type1.c",
-            "type42/type42.c",
-            "winfonts/winfnt.c",
-        },
-        .flags = flags,
-    });
+    const common_sources: []const []const u8 = &.{
+        "autofit/autofit.c",
+        "base/ftbase.c",
+        "base/ftbbox.c",
+        "base/ftbdf.c",
+        "base/ftbitmap.c",
+        "base/ftcid.c",
+        "base/ftfstype.c",
+        "base/ftgasp.c",
+        "base/ftglyph.c",
+        "base/ftgxval.c",
+        "base/ftinit.c",
+        "base/ftmm.c",
+        "base/ftotval.c",
+        "base/ftpatent.c",
+        "base/ftpfr.c",
+        "base/ftstroke.c",
+        "base/ftsynth.c",
+        "base/fttype1.c",
+        "base/ftwinfnt.c",
+        "bdf/bdf.c",
+        "cache/ftcache.c",
+        "cff/cff.c",
+        "cid/type1cid.c",
+        "pcf/pcf.c",
+        "pfr/pfr.c",
+        "psaux/psaux.c",
+        "pshinter/pshinter.c",
+        "psnames/psnames.c",
+        "raster/raster.c",
+        "sdf/sdf.c",
+        "sfnt/sfnt.c",
+        "smooth/smooth.c",
+        "svg/svg.c",
+        "truetype/truetype.c",
+        "type1/type1.c",
+        "type42/type42.c",
+        "winfonts/winfnt.c",
+        "hvf/hvf.c",
+    };
+    // compressed font sources require zlib/bzip2 — skip on wasm
+    const compressed_sources: []const []const u8 = &.{
+        "bzip2/ftbzip2.c",
+        "gzip/ftgzip.c",
+        "lzw/ftlzw.c",
+    };
+    lib_mod.addCSourceFiles(.{ .root = lib_dep.path("src"), .files = common_sources, .flags = flags });
+    if (!wasm_no_libc) {
+        lib_mod.addCSourceFiles(.{ .root = lib_dep.path("src"), .files = compressed_sources, .flags = flags });
+    }
     lib_mod.addIncludePath(lib_dep.path("include"));
-    lib_mod.link_libc = true;
+    if (wasm_no_libc) {
+        lib_mod.addIncludePath(b.path("src"));
+    } else {
+        lib_mod.link_libc = true;
+    }
 
-    switch (target.result.os.tag) {
+    if (wasm_no_libc) {
+        lib_mod.addCSourceFile(.{
+            .file = b.path("src/freetype_wasm_stubs.c"),
+            .flags = flags,
+        });
+        // wasm SjLj runtime (needed for setjmp/longjmp via -fwasm-exceptions)
+        lib_mod.addCSourceFile(.{
+            .file = .{ .cwd_relative = "/usr/lib/zig/libc/wasi/libc-top-half/musl/src/setjmp/wasm32/rt.c" },
+            .flags = &.{ "-fwasm-exceptions", "-mcpu=generic+exception-handling" },
+        });
+    } else switch (target.result.os.tag) {
         .linux => lib_mod.addCSourceFile(.{
             .file = lib_dep.path("builds/unix/ftsystem.c"),
             .flags = flags,
@@ -243,7 +272,7 @@ fn buildFreetype(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
             .flags = flags,
         }),
     }
-    switch (target.result.os.tag) {
+    if (!wasm_no_libc) switch (target.result.os.tag) {
         .windows => {
             lib_mod.addCSourceFile(.{
                 .file = lib_dep.path("builds/windows/ftdebug.c"),
@@ -257,10 +286,10 @@ fn buildFreetype(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
             .file = lib_dep.path("src/base/ftdebug.c"),
             .flags = flags,
         }),
-    }
+    };
 
     return b.addLibrary(.{
-        .name = "freetype",
+        .name = if (wasm_no_libc) "freetype-wasm" else "freetype",
         .linkage = .static,
         .root_module = lib_mod,
     });
