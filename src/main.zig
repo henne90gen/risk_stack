@@ -4,10 +4,7 @@ const t = std.testing;
 pub const p = @import("platform.zig");
 const zm = @import("zmath");
 const f = @import("flip7.zig");
-
-const ft = @cImport({
-    @cInclude("freetype/freetype.h");
-});
+const text = @import("text.zig");
 
 test {
     t.refAllDecls(@This());
@@ -142,6 +139,7 @@ const AppState = struct {
     gl: OpenGLState = .{},
     zoom: ZoomState = .{},
     animation: AnimationState = .{ .none = .{} },
+    font: text.Font = .{},
 
     prng: std.Random.DefaultPrng,
     players: [3]f.Player,
@@ -230,7 +228,7 @@ pub const TriangleApp = struct {
 
         // --- texture -----------------------------------------------------------
         for (card_texture_paths, 0..) |path, i| {
-            app_state.gl.card_textures[i] = loadCardTexture(app_state.allocator, path) catch std.debug.panic("failed to load card texture", .{});
+            app_state.gl.card_textures[i] = loadCardTexture(app_state.allocator, path) catch |err| std.debug.panic("failed to load card texture: {}", .{err});
         }
 
         // Bind sampler uniform to texture unit 0, and cache uniform locations
@@ -246,6 +244,8 @@ pub const TriangleApp = struct {
         p.glUniformMatrix4fv(app_state.gl.u_loc_projection, 1, p.GL_TRUE, zm.arrNPtr(&zm.identity()));
 
         p.glUseProgram(0);
+
+        app_state.font = text.Font.init(app_state.allocator) catch |err| std.debug.panic("failed to initialize font: {}", .{err});
     }
 
     // The game is designed for this logical aspect ratio (width / height).
@@ -481,9 +481,6 @@ pub const TriangleApp = struct {
         }
 
         app_state.resetInputTracking();
-
-        const bla = ft.Face{};
-        _ = bla;
     }
 };
 
