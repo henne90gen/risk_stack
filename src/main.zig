@@ -37,6 +37,11 @@ const quad_vertices = [_]f32{
     -0.5, 0.5, 0.0, 0.0, // top-left
 };
 
+const Instance = struct {
+    model: zm.Mat,
+    uv_rect: zm.Vec,
+};
+
 const card_texture_paths = [_][]const u8{
     "/cards/0.png",
     "/cards/1.png",
@@ -121,6 +126,9 @@ const OpenGLState = struct {
     u_loc_texture: i32 = 0,
     u_loc_view: i32 = 0,
     u_loc_projection: i32 = 0,
+    u_loc_color: i32 = 0,
+    u_loc_render_type: i32 = 0,
+    font_atlas_tex: u32 = 0,
 };
 
 const AnimationState = union(enum) {
@@ -207,7 +215,7 @@ pub const TriangleApp = struct {
 
         // A mat4 takes up 4 consecutive vec4 attribute slots (locations 2–5).
         p.glBindVertexArray(app_state.gl.tri_vao);
-        const mat_stride: i32 = @sizeOf(zm.Mat);
+        const mat_stride: i32 = @sizeOf(Instance);
         inline for (0..4) |col| {
             const slot: u32 = 2 + col;
             p.glEnableVertexAttribArray(slot);
@@ -219,9 +227,19 @@ pub const TriangleApp = struct {
                 mat_stride,
                 @ptrFromInt(col * @sizeOf(zm.Vec)),
             );
-            // Advance the attribute once per instance, not per vertex.
             p.glVertexAttribDivisor(slot, 1);
         }
+        // aUVRect: location 6, vec4 (u0, v0, u1, v1), after the mat4.
+        p.glEnableVertexAttribArray(6);
+        p.glVertexAttribPointer(
+            6,
+            4,
+            p.GL_FLOAT,
+            p.GL_FALSE,
+            mat_stride,
+            @ptrFromInt(@offsetOf(Instance, "uv_rect")),
+        );
+        p.glVertexAttribDivisor(6, 1);
         p.glBindBuffer(p.GL_ARRAY_BUFFER, 0);
 
         p.glBindVertexArray(0);
@@ -237,6 +255,12 @@ pub const TriangleApp = struct {
         app_state.gl.u_loc_texture = p.glGetUniformLocation(app_state.gl.tri_program, "uTexture");
         p.glUniform1i(app_state.gl.u_loc_texture, 0);
 
+        app_state.gl.u_loc_color = p.glGetUniformLocation(app_state.gl.tri_program, "uColor");
+        p.glUniform3f(app_state.gl.u_loc_color, 0, 0, 0);
+
+        app_state.gl.u_loc_render_type = p.glGetUniformLocation(app_state.gl.tri_program, "uRenderType");
+        p.glUniform1i(app_state.gl.u_loc_render_type, 0);
+
         app_state.gl.u_loc_view = p.glGetUniformLocation(app_state.gl.tri_program, "uView");
         p.glUniformMatrix4fv(app_state.gl.u_loc_view, 1, p.GL_TRUE, zm.arrNPtr(&zm.identity()));
 
@@ -246,10 +270,31 @@ pub const TriangleApp = struct {
         p.glUseProgram(0);
 
         app_state.font = text.Font.init(app_state.allocator) catch |err| std.debug.panic("failed to initialize font: {}", .{err});
-    }
 
-    // The game is designed for this logical aspect ratio (width / height).
-    const game_aspect: f32 = 16.0 / 9.0;
+        // Upload font atlas as a single-channel (GL_RED) texture for debug rendering.
+        p.glGenTextures(1, @as([*]u32, @ptrCast(&app_state.gl.font_atlas_tex)));
+        p.glBindTexture(p.GL_TEXTURE_2D, app_state.gl.font_atlas_tex);
+        p.glTexImage2D(
+            p.GL_TEXTURE_2D,
+            0,
+            @intCast(p.GL_RED),
+            @intCast(app_state.font.atlas_width),
+            @intCast(app_state.font.atlas_height),
+            0,
+            p.GL_RED,
+            p.GL_UNSIGNED_BYTE,
+            app_state.font.texture_atlas_buffer.ptr,
+            app_state.font.texture_atlas_buffer.len,
+        );
+        p.glTexParameteri(p.GL_TEXTURE_2D, p.GL_TEXTURE_MIN_FILTER, @intCast(p.GL_LINEAR));
+        p.glTexParameteri(p.GL_TEXTURE_2D, p.GL_TEXTURE_MAG_FILTER, @intCast(p.GL_LINEAR));
+        p.glTexParameteri(p.GL_TEXTURE_2D, p.GL_TEXTURE_WRAP_S, @intCast(p.GL_CLAMP_TO_EDGE));
+        p.glTexParameteri(p.GL_TEXTURE_2D, p.GL_TEXTURE_WRAP_T, @intCast(p.GL_CLAMP_TO_EDGE));
+        p.glBindTexture(p.GL_TEXTURE_2D, 0);
+
+        p.glEnable(p.GL_BLEND);
+        p.glBlendFunc(p.GL_SRC_ALPHA, p.GL_ONE_MINUS_SRC_ALPHA);
+    }
 
     pub fn onResize(w: c_uint, h: c_uint, scale: f32) void {
         p.logInfo("resizing to new dimensions {}x{} with scale {}", .{ w, h, scale });
@@ -257,25 +302,12 @@ pub const TriangleApp = struct {
         const fw: f32 = @floatFromInt(w);
         const fh: f32 = @floatFromInt(h);
 
-        // Pixel dimensions of the full canvas.
         const pw: f32 = @round(fw * scale);
         const ph: f32 = @round(fh * scale);
 
-        // Largest centered rectangle that fits the canvas at the desired ratio.
-        var vw: f32 = pw;
-        var vh: f32 = @round(vw / game_aspect);
-        if (vh > ph) {
-            vh = ph;
-            vw = @round(vh * game_aspect);
-        }
+        p.glViewport(0, 0, @intFromFloat(pw), @intFromFloat(ph));
 
-        // Center it: offset from the bottom-left corner of the canvas.
-        const ox: i32 = @intFromFloat(@round((pw - vw) / 2.0));
-        const oy: i32 = @intFromFloat(@round((ph - vh) / 2.0));
-
-        p.glViewport(ox, oy, @intFromFloat(vw), @intFromFloat(vh));
-
-        app_state.aspect_ratio = vw / vh;
+        app_state.aspect_ratio = pw / ph;
     }
 
     pub fn onKeyDown(key: p.Key) void {
@@ -335,24 +367,26 @@ pub const TriangleApp = struct {
         const ortho = zm.orthographicOffCenterRh(-half_w, half_w, -half_h, half_h, -1.0, 1.0);
         p.glUniformMatrix4fv(app_state.gl.u_loc_projection, 1, p.GL_TRUE, zm.arrNPtr(&ortho));
 
+        p.glUniform1i(app_state.gl.u_loc_render_type, 0);
+
         // Card dimensions in world units.
         const card_w: f32 = 0.12;
         const card_h: f32 = 0.17;
         const card_spacing: f32 = card_h * 1.1;
 
         // One instance list per texture; we issue a separate draw call per texture.
-        var batches: [card_texture_paths.len]std.ArrayListUnmanaged(zm.Mat) = undefined;
+        var batches: [card_texture_paths.len]std.ArrayListUnmanaged(Instance) = undefined;
         for (&batches) |*b| {
             b.* = .empty;
         }
         defer for (&batches) |*b| b.deinit(app_state.allocator);
 
-        // Build a card transform: position (cx, cy), rotation angle (radians CCW), size (cw x ch).
-        // Uses a 2-D TRS embedded in a 4x4 matrix.
+        // Build a card instance: position (cx, cy), rotation angle (radians CCW), size (cw x ch).
+        // uv_rect covers the full texture by default (0,0,1,1).
         const addCard = struct {
             fn call(
                 alloc: std.mem.Allocator,
-                bs: *[card_texture_paths.len]std.ArrayListUnmanaged(zm.Mat),
+                bs: *[card_texture_paths.len]std.ArrayListUnmanaged(Instance),
                 tex_idx: usize,
                 cx: f32,
                 cy: f32,
@@ -368,7 +402,10 @@ pub const TriangleApp = struct {
                     zm.f32x4(0, 0, 1, 0),
                     zm.f32x4(cx, cy, 0, 1),
                 };
-                try bs[tex_idx].append(alloc, zm.transpose(m));
+                try bs[tex_idx].append(alloc, .{
+                    .model = zm.transpose(m),
+                    .uv_rect = zm.f32x4(0, 0, 1, 1),
+                });
             }
         }.call;
 
@@ -445,7 +482,7 @@ pub const TriangleApp = struct {
             p.glBindBuffer(p.GL_ARRAY_BUFFER, app_state.gl.instance_vbo);
             p.glBufferData(
                 p.GL_ARRAY_BUFFER,
-                batch.items.len * @sizeOf(zm.Mat),
+                batch.items.len * @sizeOf(Instance),
                 batch.items.ptr,
                 p.GL_DYNAMIC_DRAW,
             );
@@ -456,6 +493,25 @@ pub const TriangleApp = struct {
         p.glBindVertexArray(0);
         p.glBindTexture(p.GL_TEXTURE_2D, 0);
         p.glUseProgram(0);
+
+        try app_state.font.drawText(
+            app_state.allocator,
+            .{
+                .tri_program = app_state.gl.tri_program,
+                .tri_vao = app_state.gl.tri_vao,
+                .u_loc_view = app_state.gl.u_loc_view,
+                .u_loc_projection = app_state.gl.u_loc_projection,
+                .u_loc_color = app_state.gl.u_loc_color,
+                .u_loc_render_type = app_state.gl.u_loc_render_type,
+                .font_atlas_tex = app_state.gl.font_atlas_tex,
+                .instance_vbo = app_state.gl.instance_vbo,
+            },
+            "The quick brown fox jumps over the lazy dog",
+            -1.0, // x
+            0.0, // y
+            0.05, // scale
+            [3]f32{ 0.0, 1.0, 1.0 }, // color
+        );
 
         if (app_state.should_run_next_step) {
             const game_should_continue = try app_state.simulation.step();

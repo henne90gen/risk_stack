@@ -67,6 +67,10 @@ pub const GL_TEXTURE_WRAP_T: u32 = 0x2803;
 pub const GL_LINEAR_MIPMAP_LINEAR: u32 = 0x2703;
 pub const GL_LINEAR: u32 = 0x2601;
 pub const GL_CLAMP_TO_EDGE: u32 = 0x812F;
+pub const GL_RED: u32 = 0x1903;
+pub const GL_BLEND: u32 = 0x0BE2;
+pub const GL_SRC_ALPHA: u32 = 0x0302;
+pub const GL_ONE_MINUS_SRC_ALPHA: u32 = 0x0303;
 
 /// GLSL version directive appropriate for this target.
 /// Native uses desktop GLSL 3.30; wasm (WebGL 2) uses GLSL ES 3.00.
@@ -82,6 +86,7 @@ const wasm = if (is_wasm) struct {
     extern fn glViewport(x: i32, y: i32, w: u32, h: u32) void;
     extern fn glClearColor(r: f32, g: f32, b: f32, a: f32) void;
     extern fn glClear(mask: u32) void;
+    extern fn glBlendFunc(sfactor: u32, dfactor: u32) void;
     extern fn glGetError() u32;
     extern fn glGenBuffers(n: i32, buffers: [*]u32) void;
     extern fn glBindBuffer(target: u32, buffer: u32) void;
@@ -106,6 +111,7 @@ const wasm = if (is_wasm) struct {
     extern fn glUniform1i(loc: i32, v: i32) void;
     extern fn glUniform1f(loc: i32, v: f32) void;
     extern fn glUniform2f(loc: i32, x: f32, y: f32) void;
+    extern fn glUniform3f(loc: i32, x: f32, y: f32, z: f32) void;
     extern fn glUniform4f(loc: i32, x: f32, y: f32, z: f32, w: f32) void;
     extern fn glUniformMatrix4fv(loc: i32, count: i32, transpose: u32, data: [*]const f32) void;
     extern fn glDeleteShader(shader: u32) void;
@@ -152,6 +158,7 @@ const GlProcs = if (!is_wasm) struct {
     Viewport: *const fn (c.GLint, c.GLint, c.GLsizei, c.GLsizei) callconv(.c) void,
     ClearColor: *const fn (c.GLfloat, c.GLfloat, c.GLfloat, c.GLfloat) callconv(.c) void,
     Clear: *const fn (c.GLbitfield) callconv(.c) void,
+    BlendFunc: *const fn (c.GLenum, c.GLenum) callconv(.c) void,
     GetError: *const fn () callconv(.c) c.GLenum,
     GenBuffers: *const fn (c.GLsizei, [*c]c.GLuint) callconv(.c) void,
     BindBuffer: *const fn (c.GLenum, c.GLuint) callconv(.c) void,
@@ -179,6 +186,7 @@ const GlProcs = if (!is_wasm) struct {
     Uniform1i: *const fn (c.GLint, c.GLint) callconv(.c) void,
     Uniform1f: *const fn (c.GLint, c.GLfloat) callconv(.c) void,
     Uniform2f: *const fn (c.GLint, c.GLfloat, c.GLfloat) callconv(.c) void,
+    Uniform3f: *const fn (c.GLint, c.GLfloat, c.GLfloat, c.GLfloat) callconv(.c) void,
     Uniform4f: *const fn (c.GLint, c.GLfloat, c.GLfloat, c.GLfloat, c.GLfloat) callconv(.c) void,
     UniformMatrix4fv: *const fn (c.GLint, c.GLsizei, c.GLboolean, [*c]const c.GLfloat) callconv(.c) void,
     DeleteShader: *const fn (c.GLuint) callconv(.c) void,
@@ -202,6 +210,7 @@ pub fn loadProcs() void {
         .Viewport = @ptrCast(proc("glViewport")),
         .ClearColor = @ptrCast(proc("glClearColor")),
         .Clear = @ptrCast(proc("glClear")),
+        .BlendFunc = @ptrCast(proc("glBlendFunc")),
         .GetError = @ptrCast(proc("glGetError")),
         .GenBuffers = @ptrCast(proc("glGenBuffers")),
         .BindBuffer = @ptrCast(proc("glBindBuffer")),
@@ -229,6 +238,7 @@ pub fn loadProcs() void {
         .Uniform1i = @ptrCast(proc("glUniform1i")),
         .Uniform1f = @ptrCast(proc("glUniform1f")),
         .Uniform2f = @ptrCast(proc("glUniform2f")),
+        .Uniform3f = @ptrCast(proc("glUniform3f")),
         .Uniform4f = @ptrCast(proc("glUniform4f")),
         .UniformMatrix4fv = @ptrCast(proc("glUniformMatrix4fv")),
         .DeleteShader = @ptrCast(proc("glDeleteShader")),
@@ -265,6 +275,10 @@ pub fn glClearColor(r: f32, g: f32, b: f32, a: f32) void {
 
 pub fn glClear(mask: u32) void {
     if (is_wasm) wasm.glClear(mask) else gl_procs.Clear(@intCast(mask));
+}
+
+pub fn glBlendFunc(sfactor: u32, dfactor: u32) void {
+    if (is_wasm) wasm.glBlendFunc(sfactor, dfactor) else gl_procs.BlendFunc(@intCast(sfactor), @intCast(dfactor));
 }
 
 pub fn glGetError() u32 {
@@ -401,6 +415,10 @@ pub fn glUniform1f(loc: i32, v: f32) void {
 
 pub fn glUniform2f(loc: i32, x: f32, y: f32) void {
     if (is_wasm) wasm.glUniform2f(loc, x, y) else gl_procs.Uniform2f(loc, x, y);
+}
+
+pub fn glUniform3f(loc: i32, x: f32, y: f32, z: f32) void {
+    if (is_wasm) wasm.glUniform3f(loc, x, y, z) else gl_procs.Uniform3f(loc, x, y, z);
 }
 
 pub fn glUniform4f(loc: i32, x: f32, y: f32, z: f32, w: f32) void {
