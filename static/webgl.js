@@ -198,6 +198,21 @@ function initWebGL(canvas, getString) {
       offset,
     );
   };
+  const glVertexAttribIPointer = (
+    attribLocation,
+    size,
+    type,
+    stride,
+    offset,
+  ) => {
+    gl.vertexAttribIPointer(
+      attribLocation,
+      size,
+      type,
+      stride,
+      offset,
+    );
+  };
   const glDrawArrays = (type, offset, count) =>
     gl.drawArrays(type, offset, count);
   const glDrawArraysInstanced = (mode, first, count, instanceCount) => {
@@ -334,6 +349,7 @@ function initWebGL(canvas, getString) {
     glUseProgram,
     glEnableVertexAttribArray,
     glVertexAttribPointer,
+    glVertexAttribIPointer,
     glDrawArrays,
     glDrawArraysInstanced,
     glCreateTexture,

@@ -40,6 +40,7 @@ pub const MouseButton = enum(u8) {
 
 // ---------------------------------------------------------------------------
 // GL constants
+// See https://javagl.github.io/GLConstantsTranslator/GLConstantsTranslator.html
 // ---------------------------------------------------------------------------
 
 pub const GL_DEPTH_TEST: u32 = 0x0B71;
@@ -49,6 +50,7 @@ pub const GL_ARRAY_BUFFER: u32 = 0x8892;
 pub const GL_STATIC_DRAW: u32 = 0x88E4;
 pub const GL_DYNAMIC_DRAW: u32 = 0x88E8;
 pub const GL_FLOAT: u32 = 0x1406;
+pub const GL_INT: u32 = 0x1404;
 pub const GL_FALSE: u32 = 0;
 pub const GL_TRUE: u32 = 1;
 pub const GL_TRIANGLES: u32 = 0x0004;
@@ -58,6 +60,11 @@ pub const GL_COMPILE_STATUS: u32 = 0x8B81;
 pub const GL_LINK_STATUS: u32 = 0x8B82;
 pub const GL_TEXTURE_2D: u32 = 0x0DE1;
 pub const GL_TEXTURE0: u32 = 0x84C0;
+pub const GL_TEXTURE1: u32 = 0x84C1;
+pub const GL_TEXTURE2: u32 = 0x84C2;
+pub const GL_TEXTURE3: u32 = 0x84C3;
+pub const GL_TEXTURE4: u32 = 0x84C4;
+pub const GL_TEXTURE5: u32 = 0x84C5;
 pub const GL_RGBA: u32 = 0x1908;
 pub const GL_UNSIGNED_BYTE: u32 = 0x1401;
 pub const GL_TEXTURE_MIN_FILTER: u32 = 0x2801;
@@ -68,6 +75,8 @@ pub const GL_LINEAR_MIPMAP_LINEAR: u32 = 0x2703;
 pub const GL_LINEAR: u32 = 0x2601;
 pub const GL_CLAMP_TO_EDGE: u32 = 0x812F;
 pub const GL_RED: u32 = 0x1903;
+pub const GL_R8: u32 = 0x8229;
+pub const GL_RGBA8: u32 = 0x8058;
 pub const GL_BLEND: u32 = 0x0BE2;
 pub const GL_SRC_ALPHA: u32 = 0x0302;
 pub const GL_ONE_MINUS_SRC_ALPHA: u32 = 0x0303;
@@ -83,6 +92,7 @@ pub const glsl_version: []const u8 =
 
 const wasm = if (is_wasm) struct {
     extern fn glEnable(cap: u32) void;
+    extern fn glActiveTexture(texture: u32) void;
     extern fn glViewport(x: i32, y: i32, w: u32, h: u32) void;
     extern fn glClearColor(r: f32, g: f32, b: f32, a: f32) void;
     extern fn glClear(mask: u32) void;
@@ -96,6 +106,7 @@ const wasm = if (is_wasm) struct {
     extern fn glVertexAttribDivisor(index: u32, divisor: u32) void;
     extern fn glEnableVertexAttribArray(index: u32) void;
     extern fn glVertexAttribPointer(index: u32, size: i32, typ: u32, normalized: u32, stride: i32, offset: ?*const anyopaque) void;
+    extern fn glVertexAttribIPointer(index: u32, size: i32, typ: u32, stride: i32, offset: ?*const anyopaque) void;
     extern fn glCreateShader(typ: u32) u32;
     extern fn glShaderSource(shader: u32, src: [*]const u8, len: i32) void;
     extern fn glCompileShader(shader: u32) void;
@@ -155,6 +166,7 @@ const c = if (!is_wasm) @cImport({
 
 const GlProcs = if (!is_wasm) struct {
     Enable: *const fn (c.GLenum) callconv(.c) void,
+    ActiveTexture: *const fn (c.GLenum) callconv(.c) void,
     Viewport: *const fn (c.GLint, c.GLint, c.GLsizei, c.GLsizei) callconv(.c) void,
     ClearColor: *const fn (c.GLfloat, c.GLfloat, c.GLfloat, c.GLfloat) callconv(.c) void,
     Clear: *const fn (c.GLbitfield) callconv(.c) void,
@@ -168,6 +180,7 @@ const GlProcs = if (!is_wasm) struct {
     VertexAttribDivisor: *const fn (c.GLuint, c.GLuint) callconv(.c) void,
     EnableVertexAttribArray: *const fn (c.GLuint) callconv(.c) void,
     VertexAttribPointer: *const fn (c.GLuint, c.GLint, c.GLenum, c.GLboolean, c.GLsizei, ?*const anyopaque) callconv(.c) void,
+    VertexAttribIPointer: *const fn (c.GLuint, c.GLint, c.GLenum, c.GLsizei, ?*const anyopaque) callconv(.c) void,
     GenVertexArrays: *const fn (c.GLsizei, [*c]c.GLuint) callconv(.c) void,
     BindVertexArray: *const fn (c.GLuint) callconv(.c) void,
     DeleteVertexArrays: *const fn (c.GLsizei, [*c]const c.GLuint) callconv(.c) void,
@@ -207,6 +220,7 @@ pub fn loadProcs() void {
     if (is_wasm) return;
     gl_procs = .{
         .Enable = @ptrCast(proc("glEnable")),
+        .ActiveTexture = @ptrCast(proc("glActiveTexture")),
         .Viewport = @ptrCast(proc("glViewport")),
         .ClearColor = @ptrCast(proc("glClearColor")),
         .Clear = @ptrCast(proc("glClear")),
@@ -220,6 +234,7 @@ pub fn loadProcs() void {
         .VertexAttribDivisor = @ptrCast(proc("glVertexAttribDivisor")),
         .EnableVertexAttribArray = @ptrCast(proc("glEnableVertexAttribArray")),
         .VertexAttribPointer = @ptrCast(proc("glVertexAttribPointer")),
+        .VertexAttribIPointer = @ptrCast(proc("glVertexAttribIPointer")),
         .GenVertexArrays = @ptrCast(proc("glGenVertexArrays")),
         .BindVertexArray = @ptrCast(proc("glBindVertexArray")),
         .DeleteVertexArrays = @ptrCast(proc("glDeleteVertexArrays")),
@@ -263,6 +278,10 @@ fn proc(comptime name: [:0]const u8) *const anyopaque {
 
 pub fn glEnable(cap: u32) void {
     if (is_wasm) wasm.glEnable(cap) else gl_procs.Enable(@intCast(cap));
+}
+
+pub fn glActiveTexture(texture_unit: u32) void {
+    if (is_wasm) wasm.glActiveTexture(texture_unit) else gl_procs.ActiveTexture(@intCast(texture_unit));
 }
 
 pub fn glViewport(x: i32, y: i32, w: u32, h: u32) void {
@@ -318,6 +337,14 @@ pub fn glVertexAttribPointer(index: u32, size: i32, typ: u32, normalized: u32, s
         wasm.glVertexAttribPointer(index, size, typ, normalized, stride, offset);
     } else {
         gl_procs.VertexAttribPointer(@intCast(index), size, @intCast(typ), @intCast(normalized), stride, offset);
+    }
+}
+
+pub fn glVertexAttribIPointer(index: u32, size: i32, typ: u32, stride: i32, offset: ?*const anyopaque) void {
+    if (is_wasm) {
+        wasm.glVertexAttribIPointer(index, size, typ, stride, offset);
+    } else {
+        gl_procs.VertexAttribIPointer(@intCast(index), size, @intCast(typ), stride, offset);
     }
 }
 

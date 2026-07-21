@@ -37,9 +37,11 @@ const quad_vertices = [_]f32{
     -0.5, 0.5, 0.0, 0.0, // top-left
 };
 
-const Instance = struct {
-    model: zm.Mat,
-    uv_rect: zm.Vec,
+const Instance = extern struct {
+    model: zm.Mat align(1),
+    uv_rect: zm.Vec align(1),
+    color: zm.Vec align(1),
+    render_type: i32 align(1),
 };
 
 const card_texture_paths = [_][]const u8{
@@ -122,13 +124,12 @@ const OpenGLState = struct {
     tri_vao: u32 = 0,
     tri_vbo: u32 = 0,
     instance_vbo: u32 = 0,
-    card_textures: [card_texture_paths.len]u32 = [_]u32{0} ** card_texture_paths.len,
-    u_loc_texture: i32 = 0,
+    card_atlas_texture: u32 = 0,
+    font_atlas_texture: u32 = 0,
+    u_loc_card_texture: i32 = 0,
+    u_loc_font_texture: i32 = 0,
     u_loc_view: i32 = 0,
     u_loc_projection: i32 = 0,
-    u_loc_color: i32 = 0,
-    u_loc_render_type: i32 = 0,
-    font_atlas_tex: u32 = 0,
 };
 
 const AnimationState = union(enum) {
@@ -148,6 +149,7 @@ const AppState = struct {
     zoom: ZoomState = .{},
     animation: AnimationState = .{ .none = .{} },
     font: text.Font = .{},
+    cards: CardTextures = .{},
 
     prng: std.Random.DefaultPrng,
     players: [3]f.Player,
@@ -213,9 +215,9 @@ pub const TriangleApp = struct {
         p.glBindBuffer(p.GL_ARRAY_BUFFER, app_state.gl.instance_vbo);
         p.glBufferData(p.GL_ARRAY_BUFFER, 0, null, p.GL_DYNAMIC_DRAW);
 
-        // A mat4 takes up 4 consecutive vec4 attribute slots (locations 2–5).
+        // aModel: location 2-5, mat4
         p.glBindVertexArray(app_state.gl.tri_vao);
-        const mat_stride: i32 = @sizeOf(Instance);
+        const instance_stride: i32 = @sizeOf(Instance);
         inline for (0..4) |col| {
             const slot: u32 = 2 + col;
             p.glEnableVertexAttribArray(slot);
@@ -224,7 +226,7 @@ pub const TriangleApp = struct {
                 4,
                 p.GL_FLOAT,
                 p.GL_FALSE,
-                mat_stride,
+                instance_stride,
                 @ptrFromInt(col * @sizeOf(zm.Vec)),
             );
             p.glVertexAttribDivisor(slot, 1);
@@ -236,30 +238,70 @@ pub const TriangleApp = struct {
             4,
             p.GL_FLOAT,
             p.GL_FALSE,
-            mat_stride,
+            instance_stride,
             @ptrFromInt(@offsetOf(Instance, "uv_rect")),
         );
         p.glVertexAttribDivisor(6, 1);
+        // aColor: location 7, vec4
+        p.glEnableVertexAttribArray(7);
+        p.glVertexAttribPointer(
+            7,
+            4,
+            p.GL_FLOAT,
+            p.GL_FALSE,
+            instance_stride,
+            @ptrFromInt(@offsetOf(Instance, "color")),
+        );
+        p.glVertexAttribDivisor(7, 1);
+        // aRenderType: location 8, int
+        p.glEnableVertexAttribArray(8);
+        p.glVertexAttribIPointer(
+            8,
+            1,
+            p.GL_INT,
+            instance_stride,
+            @ptrFromInt(@offsetOf(Instance, "render_type")),
+        );
+        p.glVertexAttribDivisor(8, 1);
         p.glBindBuffer(p.GL_ARRAY_BUFFER, 0);
 
         p.glBindVertexArray(0);
 
         // --- texture -----------------------------------------------------------
-        for (card_texture_paths, 0..) |path, i| {
-            app_state.gl.card_textures[i] = loadCardTexture(app_state.allocator, path) catch |err| std.debug.panic("failed to load card texture: {}", .{err});
-        }
+        app_state.cards = loadCardTextures(app_state.allocator, &card_texture_paths, 8, 3) catch |err| std.debug.panic("failed to load card textures: {}", .{err});
+        p.glGenTextures(1, @as([*]u32, @ptrCast(&app_state.gl.card_atlas_texture)));
+        p.glActiveTexture(p.GL_TEXTURE0);
+        p.glBindTexture(p.GL_TEXTURE_2D, app_state.gl.card_atlas_texture);
+
+        p.glTexImage2D(
+            p.GL_TEXTURE_2D,
+            0,
+            @intCast(p.GL_RGBA8),
+            @intCast(app_state.cards.buffer_width),
+            @intCast(app_state.cards.buffer_height),
+            0,
+            p.GL_RGBA,
+            p.GL_UNSIGNED_BYTE,
+            app_state.cards.texture_buffer.ptr,
+            app_state.cards.texture_buffer.len,
+        );
+
+        p.glTexParameteri(p.GL_TEXTURE_2D, p.GL_TEXTURE_MIN_FILTER, @intCast(p.GL_LINEAR_MIPMAP_LINEAR));
+        p.glTexParameteri(p.GL_TEXTURE_2D, p.GL_TEXTURE_MAG_FILTER, @intCast(p.GL_LINEAR));
+        p.glTexParameteri(p.GL_TEXTURE_2D, p.GL_TEXTURE_WRAP_S, @intCast(p.GL_CLAMP_TO_EDGE));
+        p.glTexParameteri(p.GL_TEXTURE_2D, p.GL_TEXTURE_WRAP_T, @intCast(p.GL_CLAMP_TO_EDGE));
+        p.glGenerateMipmap(p.GL_TEXTURE_2D);
+
+        p.glBindTexture(p.GL_TEXTURE_2D, 0);
 
         // Bind sampler uniform to texture unit 0, and cache uniform locations
         p.glUseProgram(app_state.gl.tri_program);
 
-        app_state.gl.u_loc_texture = p.glGetUniformLocation(app_state.gl.tri_program, "uTexture");
-        p.glUniform1i(app_state.gl.u_loc_texture, 0);
+        app_state.gl.u_loc_card_texture = p.glGetUniformLocation(app_state.gl.tri_program, "uCardTexture");
+        p.glUniform1i(app_state.gl.u_loc_card_texture, 0);
 
-        app_state.gl.u_loc_color = p.glGetUniformLocation(app_state.gl.tri_program, "uColor");
-        p.glUniform3f(app_state.gl.u_loc_color, 0, 0, 0);
-
-        app_state.gl.u_loc_render_type = p.glGetUniformLocation(app_state.gl.tri_program, "uRenderType");
-        p.glUniform1i(app_state.gl.u_loc_render_type, 0);
+        app_state.gl.u_loc_font_texture = p.glGetUniformLocation(app_state.gl.tri_program, "uFontTexture");
+        p.glUniform1i(app_state.gl.u_loc_font_texture, 1);
 
         app_state.gl.u_loc_view = p.glGetUniformLocation(app_state.gl.tri_program, "uView");
         p.glUniformMatrix4fv(app_state.gl.u_loc_view, 1, p.GL_TRUE, zm.arrNPtr(&zm.identity()));
@@ -270,14 +312,15 @@ pub const TriangleApp = struct {
         p.glUseProgram(0);
 
         app_state.font = text.Font.init(app_state.allocator) catch |err| std.debug.panic("failed to initialize font: {}", .{err});
+        p.logInfo("Loaded font.", .{});
 
-        // Upload font atlas as a single-channel (GL_RED) texture for debug rendering.
-        p.glGenTextures(1, @as([*]u32, @ptrCast(&app_state.gl.font_atlas_tex)));
-        p.glBindTexture(p.GL_TEXTURE_2D, app_state.gl.font_atlas_tex);
+        p.glGenTextures(1, @as([*]u32, @ptrCast(&app_state.gl.font_atlas_texture)));
+        p.glActiveTexture(p.GL_TEXTURE1);
+        p.glBindTexture(p.GL_TEXTURE_2D, app_state.gl.font_atlas_texture);
         p.glTexImage2D(
             p.GL_TEXTURE_2D,
             0,
-            @intCast(p.GL_RED),
+            @intCast(p.GL_R8),
             @intCast(app_state.font.atlas_width),
             @intCast(app_state.font.atlas_height),
             0,
@@ -350,6 +393,20 @@ pub const TriangleApp = struct {
     }
 
     fn render() !void {
+        var frame_arena = std.heap.ArenaAllocator.init(app_state.allocator);
+        defer _ = frame_arena.reset(.retain_capacity);
+        const frame_allocator = frame_arena.allocator();
+
+        switch (app_state.animation) {
+            .deal_card => |*data| {
+                data.t += 0.05;
+                if (data.t >= 1.0) {
+                    app_state.animation = .none;
+                }
+            },
+            .none => {},
+        }
+
         p.glClearColor(0.1, 0.1, 0.1, 1.0);
         p.glClear(p.GL_COLOR_BUFFER_BIT);
 
@@ -367,27 +424,22 @@ pub const TriangleApp = struct {
         const ortho = zm.orthographicOffCenterRh(-half_w, half_w, -half_h, half_h, -1.0, 1.0);
         p.glUniformMatrix4fv(app_state.gl.u_loc_projection, 1, p.GL_TRUE, zm.arrNPtr(&ortho));
 
-        p.glUniform1i(app_state.gl.u_loc_render_type, 0);
-
         // Card dimensions in world units.
         const card_w: f32 = 0.12;
         const card_h: f32 = 0.17;
         const card_spacing: f32 = card_h * 1.1;
 
-        // One instance list per texture; we issue a separate draw call per texture.
-        var batches: [card_texture_paths.len]std.ArrayListUnmanaged(Instance) = undefined;
-        for (&batches) |*b| {
-            b.* = .empty;
-        }
-        defer for (&batches) |*b| b.deinit(app_state.allocator);
+        var instances: std.ArrayList(Instance) = try .initCapacity(frame_allocator, 20);
+        defer instances.deinit(frame_allocator);
 
         // Build a card instance: position (cx, cy), rotation angle (radians CCW), size (cw x ch).
         // uv_rect covers the full texture by default (0,0,1,1).
         const addCard = struct {
             fn call(
                 alloc: std.mem.Allocator,
-                bs: *[card_texture_paths.len]std.ArrayListUnmanaged(Instance),
-                tex_idx: usize,
+                inst: *std.ArrayList(Instance),
+                cards: *CardTextures,
+                card_idx: usize,
                 cx: f32,
                 cy: f32,
                 angle: f32,
@@ -402,25 +454,24 @@ pub const TriangleApp = struct {
                     zm.f32x4(0, 0, 1, 0),
                     zm.f32x4(cx, cy, 0, 1),
                 };
-                try bs[tex_idx].append(alloc, .{
+                const card_atlas_entry = &cards.card_atlas[card_idx];
+                const uv_rect = zm.f32x4(
+                    card_atlas_entry.top_left_u,
+                    card_atlas_entry.top_left_v,
+                    card_atlas_entry.bottom_right_u,
+                    card_atlas_entry.bottom_right_v,
+                );
+                try inst.append(alloc, .{
                     .model = zm.transpose(m),
-                    .uv_rect = zm.f32x4(0, 0, 1, 1),
+                    .uv_rect = uv_rect,
+                    .color = zm.f32x4(0, 0, 0, 0),
+                    .render_type = 0,
                 });
             }
         }.call;
 
-        switch (app_state.animation) {
-            .deal_card => |*data| {
-                data.t += 0.05;
-                if (data.t >= 1.0) {
-                    app_state.animation = .none;
-                }
-            },
-            .none => {},
-        }
-
         // Deck: single face-down card at the center.
-        try addCard(app_state.allocator, &batches, back_texture_index, 0.0, 0.0, 0.0, card_w, card_h);
+        try addCard(frame_allocator, &instances, &app_state.cards, back_texture_index, 0.0, 0.0, std.math.pi, card_w, card_h);
 
         // Players arranged in a circle.
         const num_players = app_state.players.len;
@@ -468,50 +519,54 @@ pub const TriangleApp = struct {
                     else => {},
                 }
 
-                try addCard(app_state.allocator, &batches, cardTextureIndex(card), cx, cy, card_angle, card_w, card_h);
+                try addCard(frame_allocator, &instances, &app_state.cards, cardTextureIndex(card), cx, cy, card_angle, card_w, card_h);
             }
         }
 
-        // Issue one draw call per texture batch
-        for (&batches, 0..) |*batch, ti| {
-            if (batch.items.len == 0) {
-                continue;
-            }
-
-            p.glBindTexture(p.GL_TEXTURE_2D, app_state.gl.card_textures[ti]);
-            p.glBindBuffer(p.GL_ARRAY_BUFFER, app_state.gl.instance_vbo);
-            p.glBufferData(
-                p.GL_ARRAY_BUFFER,
-                batch.items.len * @sizeOf(Instance),
-                batch.items.ptr,
-                p.GL_DYNAMIC_DRAW,
-            );
-            p.glBindBuffer(p.GL_ARRAY_BUFFER, 0);
-            p.glDrawArraysInstanced(p.GL_TRIANGLES, 0, 6, @intCast(batch.items.len));
+        var letter_draw_data = try app_state.font.drawText(
+            frame_allocator,
+            "The quick brown fox jumps over the lazy dog",
+            0.0, // x
+            0.0, // y
+            0.05, // scale
+        );
+        defer letter_draw_data.deinit(frame_allocator);
+        for (letter_draw_data.items) |item| {
+            const angle: f32 = 0.0;
+            const cos_a = @cos(angle);
+            const sin_a = @sin(angle);
+            const m = zm.Mat{
+                zm.f32x4(cos_a * item.width, sin_a * item.width, 0, 0),
+                zm.f32x4(-sin_a * item.height, cos_a * item.height, 0, 0),
+                zm.f32x4(0, 0, 1, 0),
+                zm.f32x4(item.x, item.y, 0, 1),
+            };
+            try instances.append(frame_allocator, .{
+                .model = zm.transpose(m),
+                .uv_rect = item.uv_rect,
+                .color = zm.f32x4(0, 1.0, 1.0, 1.0),
+                .render_type = 1,
+            });
         }
+
+        p.glActiveTexture(p.GL_TEXTURE0);
+        p.glBindTexture(p.GL_TEXTURE_2D, app_state.gl.card_atlas_texture);
+        p.glActiveTexture(p.GL_TEXTURE1);
+        p.glBindTexture(p.GL_TEXTURE_2D, app_state.gl.font_atlas_texture);
+
+        p.glBindBuffer(p.GL_ARRAY_BUFFER, app_state.gl.instance_vbo);
+        p.glBufferData(
+            p.GL_ARRAY_BUFFER,
+            instances.items.len * @sizeOf(Instance),
+            instances.items.ptr,
+            p.GL_DYNAMIC_DRAW,
+        );
+        p.glBindBuffer(p.GL_ARRAY_BUFFER, 0);
+        p.glDrawArraysInstanced(p.GL_TRIANGLES, 0, 6, @intCast(instances.items.len));
 
         p.glBindVertexArray(0);
         p.glBindTexture(p.GL_TEXTURE_2D, 0);
         p.glUseProgram(0);
-
-        try app_state.font.drawText(
-            app_state.allocator,
-            .{
-                .tri_program = app_state.gl.tri_program,
-                .tri_vao = app_state.gl.tri_vao,
-                .u_loc_view = app_state.gl.u_loc_view,
-                .u_loc_projection = app_state.gl.u_loc_projection,
-                .u_loc_color = app_state.gl.u_loc_color,
-                .u_loc_render_type = app_state.gl.u_loc_render_type,
-                .font_atlas_tex = app_state.gl.font_atlas_tex,
-                .instance_vbo = app_state.gl.instance_vbo,
-            },
-            "The quick brown fox jumps over the lazy dog",
-            -1.0, // x
-            0.0, // y
-            0.05, // scale
-            [3]f32{ 0.0, 1.0, 1.0 }, // color
-        );
 
         if (app_state.should_run_next_step) {
             const game_should_continue = try app_state.simulation.step();
@@ -577,36 +632,74 @@ fn glLinkShaderProgram(vert: u32, frag: u32) !u32 {
     return prog;
 }
 
-/// Decode the image at `path` (e.g. "cards/0.png") via `platform.texture` and
-/// upload it as a freshly-generated OpenGL RGBA texture.
-/// Returns the GL texture id, or 0 on failure.
-fn loadCardTexture(allocator: std.mem.Allocator, path: []const u8) !u32 {
-    const td = try p.texture(allocator, path);
-    defer allocator.free(td.pixels);
+const CardAtlasEntry = struct {
+    top_left_u: f32 = 0.0,
+    top_left_v: f32 = 0.0,
+    bottom_right_u: f32 = 0.0,
+    bottom_right_v: f32 = 0.0,
+};
 
-    var tex: u32 = 0;
-    p.glGenTextures(1, @as([*]u32, @ptrCast(&tex)));
-    p.glBindTexture(p.GL_TEXTURE_2D, tex);
+const CardTextures = struct {
+    buffer_width: usize = 0,
+    buffer_height: usize = 0,
+    texture_buffer: []u8 = undefined,
+    card_atlas: [card_texture_paths.len]CardAtlasEntry = [_]CardAtlasEntry{.{}} ** card_texture_paths.len,
+};
 
-    p.glTexImage2D(
-        p.GL_TEXTURE_2D,
-        0,
-        @intCast(p.GL_RGBA),
-        @intCast(td.width),
-        @intCast(td.height),
-        0,
-        p.GL_RGBA,
-        p.GL_UNSIGNED_BYTE,
-        td.pixels.ptr,
-        td.pixels.len,
-    );
+fn loadCardTextures(allocator: std.mem.Allocator, texture_paths: []const []const u8, cards_per_row: u32, cards_per_col: u32) !CardTextures {
+    var result = CardTextures{};
 
-    p.glTexParameteri(p.GL_TEXTURE_2D, p.GL_TEXTURE_MIN_FILTER, @intCast(p.GL_LINEAR_MIPMAP_LINEAR));
-    p.glTexParameteri(p.GL_TEXTURE_2D, p.GL_TEXTURE_MAG_FILTER, @intCast(p.GL_LINEAR));
-    p.glTexParameteri(p.GL_TEXTURE_2D, p.GL_TEXTURE_WRAP_S, @intCast(p.GL_CLAMP_TO_EDGE));
-    p.glTexParameteri(p.GL_TEXTURE_2D, p.GL_TEXTURE_WRAP_T, @intCast(p.GL_CLAMP_TO_EDGE));
-    p.glGenerateMipmap(p.GL_TEXTURE_2D);
+    var card_width: usize = 0;
+    var card_height: usize = 0;
+    for (texture_paths, 0..) |path, i| {
+        const td = try p.texture(allocator, path);
+        defer allocator.free(td.pixels);
 
-    p.glBindTexture(p.GL_TEXTURE_2D, 0);
-    return tex;
+        if (card_width == 0 or card_height == 0) {
+            card_width = td.width;
+            card_height = td.height;
+            result.buffer_width = cards_per_row * card_width;
+            result.buffer_height = cards_per_col * card_height;
+            result.texture_buffer = try allocator.alloc(u8, result.buffer_width * result.buffer_height * 4);
+            p.logInfo("Allocated buffer {}x{}", .{ result.buffer_width, result.buffer_height });
+        } else if (card_width != td.width or card_height != td.height) {
+            p.logErr("expected dimensions {}x{} don't match dimensions of card '{s}': {}x{}", .{ card_width, card_height, path, td.width, td.height });
+            return error.InconsistentCardPixelDimensions;
+        }
+
+        p.logInfo("\nAdding card '{s}' ({})", .{ path, i });
+
+        const start_row = (@divTrunc(i, cards_per_row)) * card_height;
+        const start_col = (i % cards_per_row) * card_width;
+        for (0..card_height) |row| {
+            for (0..card_width) |col| {
+                const final_row = start_row + row;
+                const final_col = start_col + col;
+                const buffer_index = (final_row * result.buffer_width + final_col) * 4;
+                const pixel_index = (row * card_width + col) * 4;
+                result.texture_buffer[buffer_index + 0] = td.pixels[pixel_index + 0];
+                result.texture_buffer[buffer_index + 1] = td.pixels[pixel_index + 1];
+                result.texture_buffer[buffer_index + 2] = td.pixels[pixel_index + 2];
+                result.texture_buffer[buffer_index + 3] = td.pixels[pixel_index + 3];
+            }
+        }
+
+        const buffer_height_f: f32 = @floatFromInt(result.buffer_height);
+        const buffer_width_f: f32 = @floatFromInt(result.buffer_width);
+        const start_row_f: f32 = @floatFromInt(start_row);
+        const start_col_f: f32 = @floatFromInt(start_col);
+        const end_row_f: f32 = @floatFromInt(start_row + td.height);
+        const end_col_f: f32 = @floatFromInt(start_col + td.width);
+        var card = &result.card_atlas[i];
+        card.top_left_u = end_col_f / buffer_width_f;
+        card.top_left_v = start_row_f / buffer_height_f;
+        card.bottom_right_u = start_col_f / buffer_width_f;
+        card.bottom_right_v = end_row_f / buffer_height_f;
+        p.logInfo("Pixels: {}x{} - {}x{}", .{ start_col_f, start_row_f, end_col_f, end_row_f });
+        p.logInfo("UV: {}x{} - {}x{}", .{ card.top_left_u, card.top_left_v, card.bottom_right_u, card.bottom_right_v });
+    }
+
+    p.logInfo("imported all cards into a single texture: {}x{}", .{ result.buffer_width, result.buffer_height });
+
+    return result;
 }

@@ -8,8 +8,12 @@ layout(location = 1) in vec2 aUV;
 layout(location = 2) in mat4 aModel;
 // Per-instance UV rect: (u0, v0, u1, v1), location 6.
 layout(location = 6) in vec4 aUVRect;
+layout(location = 7) in vec4 aColor;
+layout(location = 8) in int aRenderType;
 
 out vec2 vUV;
+out vec4 vColor;
+flat out int vRenderType;
 
 uniform mat4 uView;
 uniform mat4 uProjection;
@@ -17,4 +21,6 @@ uniform mat4 uProjection;
 void main() {
     gl_Position = vec4(aPos.x, aPos.y, 0.0, 1.0) * aModel * uView * uProjection;
     vUV = vec2(mix(aUVRect.x, aUVRect.z, aUV.x), mix(aUVRect.y, aUVRect.w, aUV.y));
+    vColor = aColor;
+    vRenderType = aRenderType;
 }

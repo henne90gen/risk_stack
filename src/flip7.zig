@@ -21,6 +21,10 @@ pub const Card = enum(u8) {
     Eleven = 11,
     Twelve = 12,
 
+    SecondChance = 13,
+    Freeze = 14,
+    FlipThree = 15,
+
     PlusTwo = 16,
     PlusFour = 17,
     PlusSix = 18,
@@ -28,10 +32,6 @@ pub const Card = enum(u8) {
     PlusTen = 20,
 
     TimesTwo = 21,
-
-    SecondChance = 13,
-    Freeze = 14,
-    FlipThree = 15,
 
     pub fn isNumber(self: Card) bool {
         return @intFromEnum(self) <= @intFromEnum(Card.Twelve);

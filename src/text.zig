@@ -9,9 +9,11 @@ const p = @import("platform.zig");
 
 const font_file = @embedFile("LiberationMono-Regular.ttf");
 
-const Instance = struct {
-    model: zm.Mat,
-    uv_rect: zm.Vec,
+// TODO this is copied from main.zig and should be consolidated at some point
+const Instance = extern struct {
+    model: zm.Mat align(1),
+    uv_rect: zm.Vec align(1),
+    render_type: i32 align(1),
 };
 
 const GlState = struct {
@@ -20,7 +22,6 @@ const GlState = struct {
     u_loc_view: i32,
     u_loc_projection: i32,
     u_loc_color: i32,
-    u_loc_render_type: i32,
     instance_vbo: u32,
     font_atlas_tex: u32,
 };
@@ -73,8 +74,6 @@ pub const Font = struct {
         result.glyphs_per_col = glyphs_per_col;
         result.char_size = char_size;
 
-        p.logInfo("{} x {}", .{ buffer_width, buffer_height });
-
         for (0..glyph_count) |i| {
             const c = i + ' ';
             err = ft.FT_Load_Char(result.face, c, ft.FT_LOAD_RENDER);
@@ -126,24 +125,13 @@ pub const Font = struct {
     pub fn drawText(
         self: *Font,
         allocator: std.mem.Allocator,
-        gl: GlState,
         text: []const u8,
         x: f32,
         y: f32,
         font_scale: f32,
-        color: [3]f32,
-    ) !void {
-        p.glUseProgram(gl.tri_program);
-        p.glBindVertexArray(gl.tri_vao);
+    ) !std.ArrayList(DrawLetterData) {
+        var result = try std.ArrayList(DrawLetterData).initCapacity(allocator, text.len);
 
-        const identity = zm.identity();
-        p.glUniformMatrix4fv(gl.u_loc_view, 1, p.GL_TRUE, zm.arrNPtr(&identity));
-        p.glUniformMatrix4fv(gl.u_loc_projection, 1, p.GL_TRUE, zm.arrNPtr(&identity));
-        p.glUniform1i(gl.u_loc_render_type, 1);
-        p.glUniform3f(gl.u_loc_color, color[0], color[1], color[2]);
-
-        var glyph_instances = try std.ArrayList(Instance).initCapacity(allocator, self.glyph_atlas.len);
-        defer glyph_instances.deinit(allocator);
         var current_x = x;
         const current_y = y;
         // pixels_to_ndc: convert pixel distances to NDC units.
@@ -167,38 +155,20 @@ pub const Font = struct {
             // bearing_x: pixels right from cursor to left edge of bitmap.
             // bearing_y: pixels up from baseline to top edge of bitmap.
             const cx = current_x + (bx + gw / 2.0) * px2ndc;
-            const cy = current_y + (by - gh / 2.0) * px2ndc;
+            const cy = -(current_y + (by - gh / 2.0) * px2ndc);
 
-            const model = zm.Mat{
-                zm.f32x4(qw, 0, 0, 0),
-                zm.f32x4(0, qh, 0, 0),
-                zm.f32x4(0, 0, 1, 0),
-                zm.f32x4(cx, cy, 0, 1),
-            };
-
-            glyph_instances.appendAssumeCapacity(.{
-                .model = zm.transpose(model),
+            result.appendAssumeCapacity(.{
+                .x = cx,
+                .y = cy,
+                .width = qw,
+                .height = -qh,
                 .uv_rect = zm.f32x4(glyph.top_left_u, glyph.top_left_v, glyph.bottom_right_u, glyph.bottom_right_v),
             });
 
             current_x += adv * px2ndc;
         }
 
-        p.glBindBuffer(p.GL_ARRAY_BUFFER, gl.instance_vbo);
-        p.glBufferData(
-            p.GL_ARRAY_BUFFER,
-            glyph_instances.items.len * @sizeOf(Instance),
-            glyph_instances.items.ptr,
-            p.GL_DYNAMIC_DRAW,
-        );
-        p.glBindBuffer(p.GL_ARRAY_BUFFER, 0);
-
-        p.glBindTexture(p.GL_TEXTURE_2D, gl.font_atlas_tex);
-        p.glDrawArraysInstanced(p.GL_TRIANGLES, 0, 6, @intCast(glyph_instances.items.len));
-
-        p.glBindVertexArray(0);
-        p.glBindTexture(p.GL_TEXTURE_2D, 0);
-        p.glUseProgram(0);
+        return result;
     }
 };
 
@@ -215,4 +185,12 @@ pub const GlyphAtlasEntry = struct {
     top_left_v: f32 = 0.0,
     bottom_right_u: f32 = 0.0,
     bottom_right_v: f32 = 0.0,
+};
+
+pub const DrawLetterData = struct {
+    x: f32 = 0,
+    y: f32 = 0,
+    width: f32 = 0,
+    height: f32 = 0,
+    uv_rect: zm.F32x4,
 };
