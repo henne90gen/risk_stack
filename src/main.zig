@@ -29,12 +29,12 @@ const frag_src: [:0]const u8 = patchShader(@embedFile("shader.frag"));
 
 const quad_vertices = [_]f32{
     //  x      y     u    v
-    -0.5, -0.5, 0.0, 1.0, // bottom-left
-    0.5, -0.5, 1.0, 1.0, // bottom-right
-    0.5, 0.5, 1.0, 0.0, // top-right
-    -0.5, -0.5, 0.0, 1.0, // bottom-left
-    0.5, 0.5, 1.0, 0.0, // top-right
-    -0.5, 0.5, 0.0, 0.0, // top-left
+    -0.5, -0.5, 0.0, 0.0, // bottom-left
+    0.5, -0.5, 1.0, 0.0, // bottom-right
+    0.5, 0.5, 1.0, 1.0, // top-right
+    -0.5, -0.5, 0.0, 0.0, // bottom-left
+    0.5, 0.5, 1.0, 1.0, // top-right
+    -0.5, 0.5, 0.0, 1.0, // top-left
 };
 
 const Instance = extern struct {
@@ -184,12 +184,10 @@ pub const TriangleApp = struct {
         app_state = AppState.init(std.heap.page_allocator) catch @panic("failed to initialize app state");
         app_state.simulation = f.GameSimulation.init(app_state.allocator, app_state.prng.random(), &app_state.deck, &app_state.players) catch @panic("failed to initialize game simulation");
 
-        // --- shader program ------------------------------------------------
         const vert = glInitShader(vert_src, vert_src.len, p.GL_VERTEX_SHADER) catch std.debug.panic("vertex shader compilation failed", .{});
         const frag = glInitShader(frag_src, frag_src.len, p.GL_FRAGMENT_SHADER) catch std.debug.panic("fragment shader compilation failed", .{});
         app_state.gl.tri_program = glLinkShaderProgram(vert, frag) catch std.debug.panic("shader program linking failed", .{});
 
-        // --- geometry -------------------------------------------------------
         p.glGenVertexArrays(1, @as([*]u32, @ptrCast(&app_state.gl.tri_vao)));
         p.glGenBuffers(1, @as([*]u32, @ptrCast(&app_state.gl.tri_vbo)));
 
@@ -210,7 +208,6 @@ pub const TriangleApp = struct {
         p.glEnableVertexAttribArray(1);
         p.glVertexAttribPointer(1, 2, p.GL_FLOAT, p.GL_FALSE, stride, @ptrFromInt(2 * @sizeOf(f32)));
 
-        // --- instance VBO (model matrices, per-instance) --------------------
         p.glGenBuffers(1, @as([*]u32, @ptrCast(&app_state.gl.instance_vbo)));
         p.glBindBuffer(p.GL_ARRAY_BUFFER, app_state.gl.instance_vbo);
         p.glBufferData(p.GL_ARRAY_BUFFER, 0, null, p.GL_DYNAMIC_DRAW);
@@ -267,7 +264,6 @@ pub const TriangleApp = struct {
 
         p.glBindVertexArray(0);
 
-        // --- texture -----------------------------------------------------------
         app_state.cards = loadCardTextures(app_state.allocator, &card_texture_paths, 8, 3) catch |err| std.debug.panic("failed to load card textures: {}", .{err});
         p.glGenTextures(1, @as([*]u32, @ptrCast(&app_state.gl.card_atlas_texture)));
         p.glActiveTexture(p.GL_TEXTURE0);
@@ -389,14 +385,11 @@ pub const TriangleApp = struct {
     }
 
     pub fn onAnimationFrame() void {
+        update() catch |err| p.logErr("update failed: {}", .{err});
         render() catch |err| p.logErr("render failed: {}", .{err});
     }
 
-    fn render() !void {
-        var frame_arena = std.heap.ArenaAllocator.init(app_state.allocator);
-        defer _ = frame_arena.reset(.retain_capacity);
-        const frame_allocator = frame_arena.allocator();
-
+    fn update() !void {
         switch (app_state.animation) {
             .deal_card => |*data| {
                 data.t += 0.05;
@@ -406,6 +399,35 @@ pub const TriangleApp = struct {
             },
             .none => {},
         }
+
+        if (app_state.should_run_next_step) {
+            const game_should_continue = try app_state.simulation.step();
+            if (!game_should_continue) {
+                const game_result = app_state.simulation.result();
+                p.logInfo("game finished -> strategy {} won", .{game_result.winning_strategy});
+            } else {
+                if (app_state.simulation.events.items.len != 0) {
+                    const events = app_state.simulation.events.items[app_state.next_event_to_process_index..app_state.simulation.events.items.len];
+                    app_state.next_event_to_process_index = app_state.simulation.events.items.len;
+                    for (events) |event| {
+                        p.logInfo("event: {}", .{event});
+                        switch (event) {
+                            .DrawCard => |data| {
+                                app_state.animation = .{ .deal_card = .{ .player = data.player, .t = 0.0 } };
+                                p.logInfo("created animation", .{});
+                            },
+                            else => {},
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn render() !void {
+        var frame_arena = std.heap.ArenaAllocator.init(app_state.allocator);
+        defer _ = frame_arena.reset(.retain_capacity);
+        const frame_allocator = frame_arena.allocator();
 
         p.glClearColor(0.1, 0.1, 0.1, 1.0);
         p.glClear(p.GL_COLOR_BUFFER_BIT);
@@ -421,19 +443,17 @@ pub const TriangleApp = struct {
         app_state.zoom.update_current();
         const half_w = ar / app_state.zoom.current;
         const half_h = 1.0 / app_state.zoom.current;
-        const ortho = zm.orthographicOffCenterRh(-half_w, half_w, -half_h, half_h, -1.0, 1.0);
+        const ortho = zm.orthographicOffCenterRh(-half_w, half_w, half_h, -half_h, -1.0, 1.0);
         p.glUniformMatrix4fv(app_state.gl.u_loc_projection, 1, p.GL_TRUE, zm.arrNPtr(&ortho));
 
         // Card dimensions in world units.
         const card_w: f32 = 0.12;
         const card_h: f32 = 0.17;
-        const card_spacing: f32 = card_h * 1.1;
+        const card_spacing: f32 = card_w * 1.1;
 
         var instances: std.ArrayList(Instance) = try .initCapacity(frame_allocator, 20);
         defer instances.deinit(frame_allocator);
 
-        // Build a card instance: position (cx, cy), rotation angle (radians CCW), size (cw x ch).
-        // uv_rect covers the full texture by default (0,0,1,1).
         const addCard = struct {
             fn call(
                 alloc: std.mem.Allocator,
@@ -470,12 +490,48 @@ pub const TriangleApp = struct {
             }
         }.call;
 
+        const TextParameters = struct {
+            x: f32 = 0.0,
+            y: f32 = 0.0,
+            offset_anchor_x: f32 = 0.0,
+            offset_anchor_y: f32 = 0.0,
+            angle: f32 = 0.0,
+            scale: f32 = 1.0,
+        };
+
+        const addText = struct {
+            fn call(
+                alloc: std.mem.Allocator,
+                inst: *std.ArrayList(Instance),
+                txt: []const u8,
+                text_params: TextParameters,
+            ) !void {
+                var letter_draw_data = try app_state.font.drawText(alloc, txt, text_params.scale);
+                defer letter_draw_data.deinit(alloc);
+
+                const rotation_matrix = zm.rotationZ(text_params.angle);
+                const translation_matrix = zm.translation(text_params.x, text_params.y, 0.0);
+                for (letter_draw_data.items) |item| {
+                    const letter_translation_matrix = zm.translation(item.x + text_params.offset_anchor_x, item.y + text_params.offset_anchor_y, 0.0);
+                    const scale_matrix = zm.scaling(item.width, item.height, 1.0);
+                    const model_matrix = zm.mul(scale_matrix, zm.mul(zm.mul(letter_translation_matrix, rotation_matrix), translation_matrix));
+                    try inst.append(alloc, .{
+                        .model = zm.transpose(model_matrix),
+                        .uv_rect = item.uv_rect,
+                        .color = zm.f32x4(0, 1.0, 1.0, 1.0),
+                        .render_type = 1,
+                    });
+                }
+            }
+        }.call;
+
         // Deck: single face-down card at the center.
         try addCard(frame_allocator, &instances, &app_state.cards, back_texture_index, 0.0, 0.0, std.math.pi, card_w, card_h);
 
         // Players arranged in a circle.
         const num_players = app_state.players.len;
-        const radius: f32 = 0.72;
+        const radius: f32 = 0.65;
+        const text_radius: f32 = 0.8;
         for (&app_state.players, 0..) |*player, pi| {
             // Spread players evenly; first player starts at the bottom.
             const base_angle: f32 = -std.math.pi / 2.0 +
@@ -485,11 +541,35 @@ pub const TriangleApp = struct {
             const py: f32 = radius * @sin(base_angle);
 
             // Cards face inward (toward the center).
-            var card_angle: f32 = base_angle + std.math.pi;
+            var card_angle: f32 = base_angle + std.math.pi / 2.0;
+            if (py < 0.0) {
+                card_angle += std.math.pi;
+            }
 
             // Perpendicular direction to spread cards in a row.
             const perp_x: f32 = -@sin(base_angle);
             const perp_y: f32 = @cos(base_angle);
+
+            const score = player.handScore();
+            const score_text = try std.fmt.allocPrint(frame_allocator, "{d}", .{score});
+            defer frame_allocator.free(score_text);
+
+            const font_scale = 0.05;
+            const text_dimensions = app_state.font.textDimensions(score_text, font_scale);
+            const text_x: f32 = text_radius * @cos(base_angle);
+            const text_y: f32 = text_radius * @sin(base_angle);
+            var text_angle = base_angle + std.math.pi / 2.0;
+            if (py > 0.0) {
+                text_angle += std.math.pi;
+            }
+            try addText(frame_allocator, &instances, score_text, .{
+                .x = text_x,
+                .y = text_y,
+                .offset_anchor_x = -0.5 * text_dimensions[0],
+                .offset_anchor_y = 0.0,
+                .angle = text_angle,
+                .scale = font_scale,
+            });
 
             const n = player.hand.items.len;
             if (n == 0) {
@@ -523,32 +603,6 @@ pub const TriangleApp = struct {
             }
         }
 
-        var letter_draw_data = try app_state.font.drawText(
-            frame_allocator,
-            "The quick brown fox jumps over the lazy dog",
-            0.0, // x
-            0.0, // y
-            0.05, // scale
-        );
-        defer letter_draw_data.deinit(frame_allocator);
-        for (letter_draw_data.items) |item| {
-            const angle: f32 = 0.0;
-            const cos_a = @cos(angle);
-            const sin_a = @sin(angle);
-            const m = zm.Mat{
-                zm.f32x4(cos_a * item.width, sin_a * item.width, 0, 0),
-                zm.f32x4(-sin_a * item.height, cos_a * item.height, 0, 0),
-                zm.f32x4(0, 0, 1, 0),
-                zm.f32x4(item.x, item.y, 0, 1),
-            };
-            try instances.append(frame_allocator, .{
-                .model = zm.transpose(m),
-                .uv_rect = item.uv_rect,
-                .color = zm.f32x4(0, 1.0, 1.0, 1.0),
-                .render_type = 1,
-            });
-        }
-
         p.glActiveTexture(p.GL_TEXTURE0);
         p.glBindTexture(p.GL_TEXTURE_2D, app_state.gl.card_atlas_texture);
         p.glActiveTexture(p.GL_TEXTURE1);
@@ -567,29 +621,6 @@ pub const TriangleApp = struct {
         p.glBindVertexArray(0);
         p.glBindTexture(p.GL_TEXTURE_2D, 0);
         p.glUseProgram(0);
-
-        if (app_state.should_run_next_step) {
-            const game_should_continue = try app_state.simulation.step();
-            if (!game_should_continue) {
-                const game_result = app_state.simulation.result();
-                p.logInfo("game finished -> strategy {} won", .{game_result.winning_strategy});
-            } else {
-                if (app_state.simulation.events.items.len != 0) {
-                    const events = app_state.simulation.events.items[app_state.next_event_to_process_index..app_state.simulation.events.items.len];
-                    app_state.next_event_to_process_index = app_state.simulation.events.items.len;
-                    for (events) |event| {
-                        p.logInfo("event: {}", .{event});
-                        switch (event) {
-                            .DrawCard => |data| {
-                                app_state.animation = .{ .deal_card = .{ .player = data.player, .t = 0.0 } };
-                                p.logInfo("created animation", .{});
-                            },
-                            else => {},
-                        }
-                    }
-                }
-            }
-        }
 
         app_state.resetInputTracking();
     }

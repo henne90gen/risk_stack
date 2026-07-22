@@ -126,14 +126,12 @@ pub const Font = struct {
         self: *Font,
         allocator: std.mem.Allocator,
         text: []const u8,
-        x: f32,
-        y: f32,
         font_scale: f32,
     ) !std.ArrayList(DrawLetterData) {
         var result = try std.ArrayList(DrawLetterData).initCapacity(allocator, text.len);
 
-        var current_x = x;
-        const current_y = y;
+        var current_x: f32 = 0.0;
+        const current_y: f32 = 0.0;
         // pixels_to_ndc: convert pixel distances to NDC units.
         // char_size pixels should map to a reasonable on-screen size.
         // We treat char_size px = font_scale NDC units.
@@ -155,7 +153,7 @@ pub const Font = struct {
             // bearing_x: pixels right from cursor to left edge of bitmap.
             // bearing_y: pixels up from baseline to top edge of bitmap.
             const cx = current_x + (bx + gw / 2.0) * px2ndc;
-            const cy = -(current_y + (by - gh / 2.0) * px2ndc);
+            const cy = current_y + (by - gh / 2.0) * px2ndc;
 
             result.appendAssumeCapacity(.{
                 .x = cx,
@@ -169,6 +167,22 @@ pub const Font = struct {
         }
 
         return result;
+    }
+
+    pub fn textDimensions(self: *Font, text: []const u8, font_scale: f32) [2]f32 {
+        var current_x: f32 = 0.0;
+        const current_y: f32 = 0.0;
+        // pixels_to_ndc: convert pixel distances to NDC units.
+        // char_size pixels should map to a reasonable on-screen size.
+        // We treat char_size px = font_scale NDC units.
+        const px2ndc: f32 = font_scale / @as(f32, @floatFromInt(self.char_size));
+        for (text) |c| {
+            const glyph = &self.glyph_atlas[c - ' '];
+            const adv: f32 = @floatFromInt(glyph.advance);
+            current_x += adv * px2ndc;
+        }
+
+        return .{ current_x, current_y };
     }
 };
 
