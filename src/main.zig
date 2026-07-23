@@ -613,35 +613,55 @@ pub const Flip7App = struct {
                 continue;
             }
 
+            // Count how many deal_card animations are pending in the queue for this player
+            // (excluding special cards). The first matching animation is active; the rest
+            // are waiting and their cards should not be rendered yet.
+            var pending_deal_count: usize = 0;
+            var active_deal_anim: ?Animation = null;
+            for (app_state.animation.queue.items) |animation| {
+                switch (animation) {
+                    .deal_card => |data| {
+                        if (data.card == .Freeze or data.card == .FlipThree) continue;
+                        if (data.player != player) continue;
+                        if (active_deal_anim == null) {
+                            active_deal_anim = animation;
+                        } else {
+                            pending_deal_count += 1;
+                        }
+                    },
+                    else => {},
+                }
+            }
+
+            // Cards at the tail of the hand that are still waiting in the animation
+            // queue should not be rendered until their animation becomes active.
+            const visible_card_count = n - pending_deal_count;
+
             const tapped_spacing: f32 = card_h * 1.1;
             const effective_spacing: f32 = if (player.state == .Eliminated) tapped_spacing else card_spacing;
             const total_width: f32 = @as(f32, @floatFromInt(n - 1)) * effective_spacing;
             for (player.hand.items, 0..) |card, ci| {
+                // Skip cards that are still waiting in the animation queue.
+                if (ci >= visible_card_count) continue;
+
                 var local_card_angle = card_angle;
                 const offset: f32 = -total_width / 2.0 + @as(f32, @floatFromInt(ci)) * effective_spacing;
                 var cx = px + perp_x * offset;
                 var cy = py + perp_y * offset;
 
-                for (app_state.animation.queue.items) |animation| {
-                    switch (animation) {
-                        .deal_card => |data| {
-                            if (data.card == .Freeze or data.card == .FlipThree) continue;
-                            if (data.player != player) continue;
-                            if (ci != player.hand.items.len - 1) continue;
+                if (active_deal_anim) |anim| {
+                    const data = anim.deal_card;
+                    if (ci == visible_card_count - 1) {
+                        const result_pos = zm.lerp(zm.f32x4(0.0, 0.0, 0.0, 0.0), zm.f32x4(cx, cy, 0.0, 0.0), data.t);
+                        cx = result_pos[0];
+                        cy = result_pos[1];
 
-                            const result_pos = zm.lerp(zm.f32x4(0.0, 0.0, 0.0, 0.0), zm.f32x4(cx, cy, 0.0, 0.0), data.t);
-                            cx = result_pos[0];
-                            cy = result_pos[1];
-
-                            var start_angle: f32 = 0.0;
-                            if (local_card_angle > std.math.pi) {
-                                start_angle = std.math.pi * 2.0;
-                            }
-                            local_card_angle = std.math.lerp(start_angle, local_card_angle, data.t);
-                        },
-                        else => {},
+                        var start_angle: f32 = 0.0;
+                        if (local_card_angle > std.math.pi) {
+                            start_angle = std.math.pi * 2.0;
+                        }
+                        local_card_angle = std.math.lerp(start_angle, local_card_angle, data.t);
                     }
-                    break;
                 }
 
                 if (player.state == .RoundEnded and ci == 0) {
