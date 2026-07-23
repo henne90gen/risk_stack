@@ -219,12 +219,19 @@ pub const DrawStrategy = union(enum) {
     };
 };
 
+pub const PlayerState = enum {
+    InGame,
+    Frozen,
+    Eliminated,
+    RoundEnded,
+};
+
 pub const Player = struct {
     prng: std.Random,
     strategy: DrawStrategy,
     hand: std.ArrayList(Card),
     score: u32 = 0,
-    is_still_in_game: bool = true,
+    state: PlayerState = .InGame,
 
     pub fn init(allocator: std.mem.Allocator, prng: std.Random, strategy: DrawStrategy) !Player {
         return Player{ .prng = prng, .strategy = strategy, .hand = try std.ArrayList(Card).initCapacity(allocator, 20) };
@@ -442,13 +449,14 @@ pub const Player = struct {
         for (0..self.hand.items.len - 1) |i| {
             // always comparing to the last card, since that's the one that was just added
             if (self.hand.items[i] == self.hand.items[self.hand.items.len - 1]) {
-                // Remove the duplicate card that was just added
-                _ = self.hand.pop();
                 // SecondChance saves the player: remove the SecondChance instead of eliminating
                 if (self.removeCard(.SecondChance)) {
+                    // Remove the duplicate card that was just added
+                    _ = self.hand.pop();
                     return false;
                 }
-                self.is_still_in_game = false;
+
+                self.state = .Eliminated;
                 return false;
             }
         }
@@ -594,16 +602,30 @@ pub const Player = struct {
 
     pub fn endRound(self: *Player) void {
         self.score += self.handScore();
-        self.is_still_in_game = false;
+        self.state = .RoundEnded;
+    }
+
+    pub fn freeze(self: *Player) void {
+        self.score += self.handScore();
+        self.state = .Frozen;
     }
 
     pub fn nextRound(self: *Player) void {
         self.hand.clearRetainingCapacity();
-        self.is_still_in_game = true;
+        self.state = .InGame;
+    }
+
+    pub fn is_still_in_game(self: *const Player) bool {
+        return self.state == .InGame;
     }
 };
 
 pub const GameEvent = union(enum) {
+    PlayerFrozen: struct {
+        freezing_player: *Player,
+        frozen_player: *Player,
+        score: u32,
+    },
     PlayerEliminated: struct {
         player: *Player,
     },
@@ -686,7 +708,7 @@ pub const GameSimulation = struct {
 
         var all_players_eliminated = true;
         for (self.players) |p| {
-            if (p.is_still_in_game) {
+            if (p.is_still_in_game()) {
                 all_players_eliminated = false;
                 break;
             }
@@ -708,7 +730,7 @@ pub const GameSimulation = struct {
 
         const starting_player_index = self.current_player_index;
         var player = &self.players[self.current_player_index];
-        while (!player.is_still_in_game) {
+        while (!player.is_still_in_game()) {
             self.current_player_index += 1;
             if (self.current_player_index >= self.players.len) {
                 self.current_player_index = 0;
@@ -774,7 +796,7 @@ pub const GameSimulation = struct {
         var available_players = std.ArrayList(*Player).initBuffer(self.player_selection_buffer);
         for (self.players) |*other_player| {
             if (other_player == player) continue;
-            if (!other_player.is_still_in_game) continue;
+            if (!other_player.is_still_in_game()) continue;
             if (other_player.hasCard(card)) continue;
             available_players.appendAssumeCapacity(other_player);
         }
@@ -796,22 +818,22 @@ pub const GameSimulation = struct {
             if (p == player) {
                 continue;
             }
-            if (!p.is_still_in_game) {
+            if (!p.is_still_in_game()) {
                 continue;
             }
             available_players.appendAssumeCapacity(p);
         }
 
         if (available_players.items.len == 0) {
-            player.endRound();
-            try self.addEvent(.{ .PlayerEliminated = .{ .player = player } });
+            player.freeze();
+            try self.addEvent(.{ .PlayerFrozen = .{ .freezing_player = player, .frozen_player = player, .score = player.score } });
             return;
         }
 
         const random_index = self.prng.intRangeLessThan(usize, 0, available_players.items.len);
         var freeze_target = &self.players[random_index];
-        freeze_target.endRound();
-        try self.addEvent(.{ .PlayerEndRound = .{ .player = freeze_target, .score = freeze_target.score } });
+        freeze_target.freeze();
+        try self.addEvent(.{ .PlayerFrozen = .{ .freezing_player = player, .frozen_player = freeze_target, .score = freeze_target.score } });
     }
 
     fn drawThreeCards(self: *GameSimulation, player: *Player) error{OutOfMemory}!void {
@@ -842,7 +864,7 @@ pub const GameSimulation = struct {
 
             const round_over = player.takeCard(drawn);
             try self.addEvent(.{ .DrawCard = .{ .player = player, .card = drawn } });
-            if (round_over or !player.is_still_in_game) {
+            if (round_over or !player.is_still_in_game()) {
                 should_resolve_action_cards = false;
                 break;
             }
@@ -865,7 +887,7 @@ pub const GameSimulation = struct {
             if (p == player) {
                 continue;
             }
-            if (!p.is_still_in_game) {
+            if (!p.is_still_in_game()) {
                 continue;
             }
             available_players.appendAssumeCapacity(p);

@@ -132,14 +132,27 @@ const OpenGLState = struct {
     u_loc_projection: i32 = 0,
 };
 
-const AnimationState = union(enum) {
-    none: struct {},
+const Animation = union(enum) {
     deal_card: struct {
-        t: f32,
-        // deck_pos: [2]f32,
-        // player_pos: [2]f32,
         player: *f.Player,
+        card: f.Card,
+        t: f32 = 0.0,
     },
+    freeze_player: struct {
+        freezing_player: *f.Player,
+        frozen_player: *f.Player,
+        t: f32 = 0.0,
+    },
+};
+
+const AnimationState = struct {
+    queue: std.ArrayList(Animation),
+
+    pub fn init(allocator: std.mem.Allocator) !AnimationState {
+        return AnimationState{
+            .queue = try std.ArrayList(Animation).initCapacity(allocator, 10),
+        };
+    }
 };
 
 const AppState = struct {
@@ -147,7 +160,7 @@ const AppState = struct {
     aspect_ratio: f32 = 1.0,
     gl: OpenGLState = .{},
     zoom: ZoomState = .{},
-    animation: AnimationState = .{ .none = .{} },
+    animation: AnimationState,
     font: text.Font = .{},
     cards: CardTextures = .{},
 
@@ -164,6 +177,7 @@ const AppState = struct {
         const deck = try f.Deck.init(allocator, prng);
         return AppState{
             .allocator = allocator,
+            .animation = try AnimationState.init(allocator),
             .prng = prng,
             .players = [_]f.Player{
                 try .init(allocator, prng, f.DrawStrategy{ .MinPoints = 20 }),
@@ -181,7 +195,7 @@ const AppState = struct {
 
 var app_state: AppState = undefined;
 
-pub const TriangleApp = struct {
+pub const Flip7App = struct {
     pub fn onInit() void {
         app_state = AppState.init(std.heap.page_allocator) catch @panic("failed to initialize app state");
         app_state.simulation = f.GameSimulation.init(app_state.allocator, app_state.prng, &app_state.deck, &app_state.players) catch @panic("failed to initialize game simulation");
@@ -392,19 +406,28 @@ pub const TriangleApp = struct {
     }
 
     fn update() !void {
-        switch (app_state.animation) {
-            .deal_card => |*data| {
-                data.t += 0.05;
-                if (data.t >= 1.0) {
-                    app_state.animation = .none;
-                }
-            },
-            .none => {},
+        for (app_state.animation.queue.items) |*animation| {
+            switch (animation.*) {
+                .deal_card => |*data| {
+                    data.t += 0.05;
+                    if (data.t >= 1.0) {
+                        _ = app_state.animation.queue.orderedRemove(0);
+                    }
+                },
+                .freeze_player => |*data| {
+                    data.t += 0.03;
+                    if (data.t >= 1.0) {
+                        _ = app_state.animation.queue.orderedRemove(0);
+                    }
+                },
+            }
+            return;
         }
 
         if (!app_state.should_run_next_step) {
             return;
         }
+        app_state.resetInputTracking();
 
         const game_should_continue = try app_state.simulation.step();
         if (!game_should_continue) {
@@ -428,7 +451,10 @@ pub const TriangleApp = struct {
 
             switch (event) {
                 .DrawCard => |data| {
-                    app_state.animation = .{ .deal_card = .{ .player = data.player, .t = 0.0 } };
+                    try app_state.animation.queue.append(app_state.allocator, .{ .deal_card = .{ .player = data.player, .card = data.card } });
+                },
+                .PlayerFrozen => |data| {
+                    try app_state.animation.queue.append(app_state.allocator, .{ .freeze_player = .{ .freezing_player = data.freezing_player, .frozen_player = data.frozen_player } });
                 },
                 else => {},
             }
@@ -587,16 +613,22 @@ pub const TriangleApp = struct {
                 continue;
             }
 
-            const total_width: f32 = @as(f32, @floatFromInt(n - 1)) * card_spacing;
+            const tapped_spacing: f32 = card_h * 1.1;
+            const effective_spacing: f32 = if (player.state == .Eliminated) tapped_spacing else card_spacing;
+            const total_width: f32 = @as(f32, @floatFromInt(n - 1)) * effective_spacing;
             for (player.hand.items, 0..) |card, ci| {
                 var local_card_angle = card_angle;
-                const offset: f32 = -total_width / 2.0 + @as(f32, @floatFromInt(ci)) * card_spacing;
+                const offset: f32 = -total_width / 2.0 + @as(f32, @floatFromInt(ci)) * effective_spacing;
                 var cx = px + perp_x * offset;
                 var cy = py + perp_y * offset;
 
-                switch (app_state.animation) {
-                    .deal_card => |data| {
-                        if (data.player == player and ci == player.hand.items.len - 1) {
+                for (app_state.animation.queue.items) |animation| {
+                    switch (animation) {
+                        .deal_card => |data| {
+                            if (data.card == .Freeze or data.card == .FlipThree) continue;
+                            if (data.player != player) continue;
+                            if (ci != player.hand.items.len - 1) continue;
+
                             const result_pos = zm.lerp(zm.f32x4(0.0, 0.0, 0.0, 0.0), zm.f32x4(cx, cy, 0.0, 0.0), data.t);
                             cx = result_pos[0];
                             cy = result_pos[1];
@@ -606,19 +638,112 @@ pub const TriangleApp = struct {
                                 start_angle = std.math.pi * 2.0;
                             }
                             local_card_angle = std.math.lerp(start_angle, local_card_angle, data.t);
-                        }
-                    },
-                    else => {},
+                        },
+                        else => {},
+                    }
+                    break;
                 }
 
-                if (!player.is_still_in_game and ci == 0) {
+                if (player.state == .RoundEnded and ci == 0) {
                     local_card_angle += std.math.pi / 2.0;
                     cx -= perp_x * (card_w / 2.0);
                     cy -= perp_y * (card_w / 2.0);
                 }
 
+                if (player.state == .Eliminated) {
+                    local_card_angle += std.math.pi / 2.0;
+                }
+
                 try addCard(frame_allocator, &instances, &app_state.cards, cardTextureIndex(card), cx, cy, local_card_angle, card_w, card_h);
             }
+
+            // render drawing flipthree/freeze card animation
+            for (app_state.animation.queue.items) |animation| {
+                switch (animation) {
+                    .deal_card => |data| {
+                        if (data.card != .Freeze and data.card != .FlipThree) continue;
+                        if (data.player != player) continue;
+
+                        var local_card_angle = card_angle;
+                        // animate to the center of the players hand
+                        // const offset: f32 = -total_width / 2.0 + @as(f32, @floatFromInt(0)) * card_spacing;
+                        // var cx = px + perp_x * offset;
+                        // var cy = py + perp_y * offset;
+
+                        const result_pos = zm.lerp(zm.f32x4(0.0, 0.0, 0.0, 0.0), zm.f32x4(px, py, 0.0, 0.0), data.t);
+                        const cx = result_pos[0];
+                        const cy = result_pos[1];
+
+                        var start_angle: f32 = 0.0;
+                        if (local_card_angle > std.math.pi) {
+                            start_angle = std.math.pi * 2.0;
+                        }
+                        local_card_angle = std.math.lerp(start_angle, local_card_angle, data.t);
+
+                        try addCard(frame_allocator, &instances, &app_state.cards, cardTextureIndex(data.card), cx, cy, local_card_angle, card_w, card_h);
+                    },
+                    else => {},
+                }
+                break;
+            }
+
+            // render freeze card in front of player if they are frozen
+            // but not while a freeze animation targeting this player is still pending
+            const freeze_anim_pending = for (app_state.animation.queue.items) |anim| {
+                if (anim == .freeze_player and anim.freeze_player.frozen_player == player) break true;
+            } else false;
+            if (player.state == .Frozen and !freeze_anim_pending) {
+                const freeze_card_idx = cardTextureIndex(.Freeze);
+                const freeze_card_angle = card_angle + std.math.pi / 2.0;
+                const freeze_card_cx = px;
+                const freeze_card_cy = py;
+                try addCard(frame_allocator, &instances, &app_state.cards, freeze_card_idx, freeze_card_cx, freeze_card_cy, freeze_card_angle, card_w, card_h);
+            }
+        }
+
+        // Animate the freeze card flying from freezing player to frozen player.
+        for (app_state.animation.queue.items) |animation| {
+            switch (animation) {
+                .freeze_player => |data| {
+                    // Helper: compute a player's base_angle and derived card_angle.
+                    const playerAngles = struct {
+                        fn call(players: []f.Player, target: *f.Player) struct { base: f32, card: f32 } {
+                            const np = players.len;
+                            for (players, 0..) |*pl, idx| {
+                                if (pl == target) {
+                                    const base: f32 = -std.math.pi / 2.0 +
+                                        @as(f32, @floatFromInt(idx)) * (2.0 * std.math.pi / @as(f32, @floatFromInt(np)));
+                                    var card = base + std.math.pi / 2.0;
+                                    if (radius * @sin(base) < 0.0) card += std.math.pi;
+                                    return .{ .base = base, .card = card };
+                                }
+                            }
+                            return .{ .base = 0.0, .card = 0.0 };
+                        }
+                    }.call;
+
+                    const freezing_angles = playerAngles(&app_state.players, data.freezing_player);
+                    const frozen_angles = playerAngles(&app_state.players, data.frozen_player);
+
+                    const src_x = radius * @cos(freezing_angles.base);
+                    const src_y = radius * @sin(freezing_angles.base);
+                    const dst_x = radius * @cos(frozen_angles.base);
+                    const dst_y = radius * @sin(frozen_angles.base);
+
+                    const cx = std.math.lerp(src_x, dst_x, data.t);
+                    const cy = std.math.lerp(src_y, dst_y, data.t);
+
+                    // Source angle: normal card orientation of the freezing player.
+                    // Destination angle: tapped (freeze) card orientation of the frozen player.
+                    const src_angle = freezing_angles.card;
+                    const dst_angle = frozen_angles.card + std.math.pi / 2.0;
+                    const freeze_anim_angle = std.math.lerp(src_angle, dst_angle, data.t);
+
+                    try addCard(frame_allocator, &instances, &app_state.cards, cardTextureIndex(.Freeze), cx, cy, freeze_anim_angle, card_w, card_h);
+                },
+                else => {},
+            }
+            break;
         }
 
         p.glActiveTexture(p.GL_TEXTURE0);
@@ -639,8 +764,6 @@ pub const TriangleApp = struct {
         p.glBindVertexArray(0);
         p.glBindTexture(p.GL_TEXTURE_2D, 0);
         p.glUseProgram(0);
-
-        app_state.resetInputTracking();
     }
 };
 
