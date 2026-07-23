@@ -103,7 +103,7 @@
                 const textureCache = new Map();
                 await Promise.all(
                     cardNames.map(async (name) => {
-                        const path = `/cards/${name}.png`;
+                        const path = `cards/${name}.png`;
                         textureCache.set(path, await decodeImage(path));
                     }),
                 );
@@ -119,7 +119,7 @@
                         console.error(getString(ptr, len));
                     },
 
-                    // path_ptr/path_len:     image path string in wasm memory (e.g. "/cards/0.png")
+                    // path_ptr/path_len:     image path string in wasm memory (e.g. "cards/0.png")
                     // buf_ptr/buf_len:        caller-allocated RGBA pixel buffer in wasm memory
                     // out_width_ptr:          where to write image width  (u32, little-endian)
                     // out_height_ptr:         where to write image height (u32, little-endian)
