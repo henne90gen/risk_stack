@@ -696,12 +696,14 @@ pub const GameSimulation = struct {
                 p.nextRound();
             }
             try self.addEvent(.{ .NewRoundStarted = .{} });
+            return true;
         }
 
         if (self.deck.cards.items.len == 0) {
             try self.deck.refill(self.allocator);
             self.deck.shuffle();
             try self.addEvent(.{ .DeckShuffle = .{} });
+            return true;
         }
 
         const starting_player_index = self.current_player_index;
@@ -735,10 +737,12 @@ pub const GameSimulation = struct {
         self.cards_played += 1;
         switch (card) {
             .Freeze => {
+                try self.addEvent(.{ .DrawCard = .{ .player = player, .card = card } });
                 try self.handleFreeze(player);
                 return true;
             },
             .FlipThree => {
+                try self.addEvent(.{ .DrawCard = .{ .player = player, .card = card } });
                 try self.handleFlipThree(player);
                 return true;
             },
@@ -807,6 +811,7 @@ pub const GameSimulation = struct {
         const random_index = self.prng.intRangeLessThan(usize, 0, available_players.items.len);
         var freeze_target = &self.players[random_index];
         freeze_target.endRound();
+        try self.addEvent(.{ .PlayerEndRound = .{ .player = freeze_target, .score = freeze_target.score } });
     }
 
     fn drawThreeCards(self: *GameSimulation, player: *Player) error{OutOfMemory}!void {

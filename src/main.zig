@@ -151,7 +151,7 @@ const AppState = struct {
     font: text.Font = .{},
     cards: CardTextures = .{},
 
-    prng: std.Random.DefaultPrng,
+    prng: std.Random,
     players: [3]f.Player,
     deck: f.Deck,
     simulation: f.GameSimulation = undefined,
@@ -159,16 +159,18 @@ const AppState = struct {
     next_event_to_process_index: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator) !AppState {
-        var prng = std.Random.DefaultPrng.init(0);
+        var r = std.Random.DefaultPrng.init(0);
+        const prng = r.random();
+        const deck = try f.Deck.init(allocator, prng);
         return AppState{
             .allocator = allocator,
             .prng = prng,
             .players = [_]f.Player{
-                try .init(allocator, prng.random(), f.DrawStrategy{ .MinPoints = 20 }),
-                try .init(allocator, prng.random(), f.DrawStrategy{ .MinPoints = 30 }),
-                try .init(allocator, prng.random(), f.DrawStrategy{ .MinPoints = 40 }),
+                try .init(allocator, prng, f.DrawStrategy{ .MinPoints = 20 }),
+                try .init(allocator, prng, f.DrawStrategy{ .MinPoints = 30 }),
+                try .init(allocator, prng, f.DrawStrategy{ .MinPoints = 40 }),
             },
-            .deck = try f.Deck.init(allocator, prng.random()),
+            .deck = deck,
         };
     }
 
@@ -182,7 +184,7 @@ var app_state: AppState = undefined;
 pub const TriangleApp = struct {
     pub fn onInit() void {
         app_state = AppState.init(std.heap.page_allocator) catch @panic("failed to initialize app state");
-        app_state.simulation = f.GameSimulation.init(app_state.allocator, app_state.prng.random(), &app_state.deck, &app_state.players) catch @panic("failed to initialize game simulation");
+        app_state.simulation = f.GameSimulation.init(app_state.allocator, app_state.prng, &app_state.deck, &app_state.players) catch @panic("failed to initialize game simulation");
 
         const vert = glInitShader(vert_src, vert_src.len, p.GL_VERTEX_SHADER) catch std.debug.panic("vertex shader compilation failed", .{});
         const frag = glInitShader(frag_src, frag_src.len, p.GL_FRAGMENT_SHADER) catch std.debug.panic("fragment shader compilation failed", .{});
@@ -400,26 +402,35 @@ pub const TriangleApp = struct {
             .none => {},
         }
 
-        if (app_state.should_run_next_step) {
-            const game_should_continue = try app_state.simulation.step();
-            if (!game_should_continue) {
-                const game_result = app_state.simulation.result();
-                p.logInfo("game finished -> strategy {} won", .{game_result.winning_strategy});
-            } else {
-                if (app_state.simulation.events.items.len != 0) {
-                    const events = app_state.simulation.events.items[app_state.next_event_to_process_index..app_state.simulation.events.items.len];
-                    app_state.next_event_to_process_index = app_state.simulation.events.items.len;
-                    for (events) |event| {
-                        p.logInfo("event: {}", .{event});
-                        switch (event) {
-                            .DrawCard => |data| {
-                                app_state.animation = .{ .deal_card = .{ .player = data.player, .t = 0.0 } };
-                                p.logInfo("created animation", .{});
-                            },
-                            else => {},
-                        }
-                    }
-                }
+        if (!app_state.should_run_next_step) {
+            return;
+        }
+
+        const game_should_continue = try app_state.simulation.step();
+        if (!game_should_continue) {
+            const game_result = app_state.simulation.result();
+            p.logInfo("game finished -> strategy {} won", .{game_result.winning_strategy});
+            return;
+        }
+
+        if (app_state.simulation.events.items.len == 0) {
+            return;
+        }
+
+        const events = app_state.simulation.events.items[app_state.next_event_to_process_index..];
+        app_state.next_event_to_process_index = app_state.simulation.events.items.len;
+        for (events) |event| {
+            switch (event) {
+                .DrawCard => |d| p.logInfo("{} DrawCard {} {any} {}", .{ app_state.simulation.events.items.len, d.card, d.player.hand.items, d.player.strategy }),
+                .PlayerEndRound => |d| p.logInfo("{} PlayerEndRound {any} {}", .{ app_state.simulation.events.items.len, d.player.hand.items, d.player.strategy }),
+                else => p.logInfo("{} {}", .{ app_state.simulation.events.items.len, event }),
+            }
+
+            switch (event) {
+                .DrawCard => |data| {
+                    app_state.animation = .{ .deal_card = .{ .player = data.player, .t = 0.0 } };
+                },
+                else => {},
             }
         }
     }
@@ -530,8 +541,8 @@ pub const TriangleApp = struct {
 
         // Players arranged in a circle.
         const num_players = app_state.players.len;
-        const radius: f32 = 0.65;
-        const text_radius: f32 = 0.8;
+        const radius: f32 = 0.5;
+        const text_radius: f32 = 0.7;
         for (&app_state.players, 0..) |*player, pi| {
             // Spread players evenly; first player starts at the bottom.
             const base_angle: f32 = -std.math.pi / 2.0 +
@@ -578,6 +589,7 @@ pub const TriangleApp = struct {
 
             const total_width: f32 = @as(f32, @floatFromInt(n - 1)) * card_spacing;
             for (player.hand.items, 0..) |card, ci| {
+                var local_card_angle = card_angle;
                 const offset: f32 = -total_width / 2.0 + @as(f32, @floatFromInt(ci)) * card_spacing;
                 var cx = px + perp_x * offset;
                 var cy = py + perp_y * offset;
@@ -590,16 +602,22 @@ pub const TriangleApp = struct {
                             cy = result_pos[1];
 
                             var start_angle: f32 = 0.0;
-                            if (card_angle > std.math.pi) {
+                            if (local_card_angle > std.math.pi) {
                                 start_angle = std.math.pi * 2.0;
                             }
-                            card_angle = std.math.lerp(start_angle, card_angle, data.t);
+                            local_card_angle = std.math.lerp(start_angle, local_card_angle, data.t);
                         }
                     },
                     else => {},
                 }
 
-                try addCard(frame_allocator, &instances, &app_state.cards, cardTextureIndex(card), cx, cy, card_angle, card_w, card_h);
+                if (!player.is_still_in_game and ci == 0) {
+                    local_card_angle += std.math.pi / 2.0;
+                    cx -= perp_x * (card_w / 2.0);
+                    cy -= perp_y * (card_w / 2.0);
+                }
+
+                try addCard(frame_allocator, &instances, &app_state.cards, cardTextureIndex(card), cx, cy, local_card_angle, card_w, card_h);
             }
         }
 
