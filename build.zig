@@ -254,8 +254,10 @@ fn buildFreetype(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
             .flags = flags,
         });
         // wasm SjLj runtime (needed for setjmp/longjmp via -fwasm-exceptions)
+        const zig_lib_dir = b.graph.zig_lib_directory.path orelse "/usr/lib/zig";
+        const rt_c_path = b.pathJoin(&.{ zig_lib_dir, "libc/wasi/libc-top-half/musl/src/setjmp/wasm32/rt.c" });
         lib_mod.addCSourceFile(.{
-            .file = .{ .cwd_relative = "/usr/lib/zig/libc/wasi/libc-top-half/musl/src/setjmp/wasm32/rt.c" },
+            .file = .{ .cwd_relative = rt_c_path },
             .flags = &.{ "-fwasm-exceptions", "-mcpu=generic+exception-handling" },
         });
     } else switch (target.result.os.tag) {
