@@ -601,7 +601,7 @@ pub fn close() void {
 
 fn validateApp(comptime App: type) void {
     const required = .{
-        .{ "onInit", fn () void },
+        .{ "onInit", fn (c_ulong) void },
         .{ "onResize", fn (c_uint, c_uint, f32) void },
         .{ "onKeyDown", fn (Key) void },
         .{ "onKeyUp", fn (Key) void },
@@ -631,8 +631,8 @@ pub fn run(comptime App: type) void {
 
     if (is_wasm) {
         const Exports = struct {
-            export fn onInit() void {
-                App.onInit();
+            export fn onInit(seed: c_ulong) void {
+                App.onInit(seed);
             }
             export fn onResize(w: c_uint, h: c_uint, s: f32) void {
                 App.onResize(w, h, s);

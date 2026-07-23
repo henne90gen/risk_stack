@@ -193,7 +193,8 @@ pub fn run(comptime App: type) void {
     p.loadProcs();
     logGlInfo();
 
-    App.onInit();
+    // TODO get time and pass as seed
+    App.onInit(0);
 
     {
         var lw: c_int = 0;

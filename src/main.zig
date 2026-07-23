@@ -171,8 +171,8 @@ const AppState = struct {
     should_run_next_step: bool = false,
     next_event_to_process_index: usize = 0,
 
-    pub fn init(allocator: std.mem.Allocator) !AppState {
-        var r = std.Random.DefaultPrng.init(0);
+    pub fn init(allocator: std.mem.Allocator, seed: u64) !AppState {
+        var r = std.Random.DefaultPrng.init(seed);
         const prng = r.random();
         const deck = try f.Deck.init(allocator, prng);
         return AppState{
@@ -196,8 +196,8 @@ const AppState = struct {
 var app_state: AppState = undefined;
 
 pub const Flip7App = struct {
-    pub fn onInit() void {
-        app_state = AppState.init(std.heap.page_allocator) catch @panic("failed to initialize app state");
+    pub fn onInit(seed: c_ulong) void {
+        app_state = AppState.init(std.heap.page_allocator, seed) catch @panic("failed to initialize app state");
         app_state.simulation = f.GameSimulation.init(app_state.allocator, app_state.prng, &app_state.deck, &app_state.players) catch @panic("failed to initialize game simulation");
 
         const vert = glInitShader(vert_src, vert_src.len, p.GL_VERTEX_SHADER) catch std.debug.panic("vertex shader compilation failed", .{});
@@ -588,7 +588,7 @@ pub const Flip7App = struct {
             const perp_y: f32 = @cos(base_angle);
 
             const score = player.handScore();
-            const score_text = try std.fmt.allocPrint(frame_allocator, "{d}", .{score});
+            const score_text = try std.fmt.allocPrint(frame_allocator, "{d} ({d})", .{ score, player.score });
             defer frame_allocator.free(score_text);
 
             const font_scale = 0.05;
