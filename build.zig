@@ -10,12 +10,12 @@ pub fn build(b: *std.Build) void {
 
     { // simulation executable
         const exe_mod = b.createModule(.{
-            .root_source_file = b.path("src/flip7_sim.zig"),
+            .root_source_file = b.path("src/risk_stack_sim.zig"),
             .target = target,
             .optimize = optimize,
         });
         const exe = b.addExecutable(.{
-            .name = "flip7_sim",
+            .name = "risk_stack_sim",
             .root_module = exe_mod,
         });
         b.installArtifact(exe);
@@ -107,7 +107,7 @@ pub fn build(b: *std.Build) void {
         exe_mod.addImport("zmath", zmath_dep.module("root"));
 
         const exe = b.addExecutable(.{
-            .name = "flip7",
+            .name = "risk_stack",
             .root_module = exe_mod,
         });
         b.installArtifact(exe);
@@ -144,7 +144,7 @@ pub fn build(b: *std.Build) void {
         wasm_mod.addCMacro("FT_CONFIG_STANDARD_LIBRARY_H", "\"freetype_wasm_stdlib.h\"");
 
         const wasm_exe = b.addExecutable(.{
-            .name = "flip7",
+            .name = "risk_stack",
             .root_module = wasm_mod,
         });
         wasm_exe.entry = .disabled;

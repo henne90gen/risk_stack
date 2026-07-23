@@ -167,7 +167,7 @@ pub fn run(comptime App: type) void {
     _ = c.SDL_GL_SetAttribute(c.SDL_GL_DEPTH_SIZE, 24);
 
     const window = c.SDL_CreateWindow(
-        "flip7",
+        "Risk Stack",
         1280,
         720,
         c.SDL_WINDOW_OPENGL | c.SDL_WINDOW_RESIZABLE,

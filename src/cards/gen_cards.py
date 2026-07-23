@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generates one SVG per Flip 7 card into the current directory."""
+"""Generates one SVG per Risk Stack card into the current directory."""
 
 import os
 

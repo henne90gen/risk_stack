@@ -9,6 +9,6 @@ test {
 
 pub fn main() !void {
     if (comptime @import("builtin").target.cpu.arch != .wasm32) {
-        m.p.run(m.Flip7App);
+        m.p.run(m.RiskStackApp);
     }
 }

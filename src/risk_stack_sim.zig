@@ -1,7 +1,7 @@
 const std = @import("std");
 const t = std.testing;
 
-const f7 = @import("flip7.zig");
+const f7 = @import("risk_stack.zig");
 
 test {
     t.refAllDecls(@This());

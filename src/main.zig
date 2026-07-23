@@ -3,7 +3,7 @@ const t = std.testing;
 
 pub const p = @import("platform.zig");
 const zm = @import("zmath");
-const f = @import("flip7.zig");
+const f = @import("risk_stack.zig");
 const text = @import("text.zig");
 
 test {
@@ -195,7 +195,7 @@ const AppState = struct {
 
 var app_state: AppState = undefined;
 
-pub const Flip7App = struct {
+pub const RiskStackApp = struct {
     pub fn onInit(seed: c_ulong) void {
         app_state = AppState.init(std.heap.page_allocator, seed) catch @panic("failed to initialize app state");
         app_state.simulation = f.GameSimulation.init(app_state.allocator, app_state.prng, &app_state.deck, &app_state.players) catch @panic("failed to initialize game simulation");

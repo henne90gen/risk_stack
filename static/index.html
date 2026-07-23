@@ -3,7 +3,7 @@
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>Flip7</title>
+        <title>Risk Stack</title>
         <style>
             * {
                 margin: 0;
@@ -166,8 +166,8 @@
                 // Load and instantiate the Wasm module
                 // -------------------------------------------------------------------------
 
-                console.log("Loading flip7.wasm...");
-                const response = await fetch("flip7.wasm", {
+                console.log("Loading risk_stack.wasm...");
+                const response = await fetch("risk_stack.wasm", {
                     cache: "no-store",
                 });
                 const { instance } = await WebAssembly.instantiateStreaming(
