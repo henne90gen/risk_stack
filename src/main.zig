@@ -155,6 +155,11 @@ const AnimationState = struct {
     }
 };
 
+const FlipThreeStackEntry = struct {
+    player: *f.Player,
+    target: *f.Player,
+};
+
 const AppState = struct {
     allocator: std.mem.Allocator,
     aspect_ratio: f32 = 1.0,
@@ -168,6 +173,7 @@ const AppState = struct {
     players: [3]f.Player,
     deck: f.Deck,
     simulation: f.GameSimulation = undefined,
+    flip_three_stack: std.ArrayList(FlipThreeStackEntry),
     should_run_next_step: bool = false,
     next_event_to_process_index: usize = 0,
 
@@ -185,6 +191,7 @@ const AppState = struct {
                 try .init(allocator, prng, f.DrawStrategy{ .MinPoints = 40 }),
             },
             .deck = deck,
+            .flip_three_stack = try std.ArrayList(FlipThreeStackEntry).initCapacity(allocator, 3),
         };
     }
 
@@ -383,7 +390,14 @@ pub const RiskStackApp = struct {
     }
 
     pub fn onMouseDown(button: p.MouseButton, x: f32, y: f32) void {
-        p.logInfo("onMouseDown: {} -> {} | {}", .{ button, x, y });
+        switch (button) {
+            p.MouseButton.Left => {
+                app_state.should_run_next_step = true;
+            },
+            else => {
+                p.logInfo("onMouseDown: {} -> {} | {}", .{ button, x, y });
+            },
+        }
     }
 
     pub fn onMouseUp(button: p.MouseButton, x: f32, y: f32) void {
@@ -455,6 +469,11 @@ pub const RiskStackApp = struct {
                 },
                 .PlayerFrozen => |data| {
                     try app_state.animation.queue.append(app_state.allocator, .{ .freeze_player = .{ .freezing_player = data.freezing_player, .frozen_player = data.frozen_player } });
+                },
+                .FlipThreeEnded => {
+                    // if (app_state.flip_three_count > 0) {
+                    //     app_state.flip_three_count -= 1;
+                    // }
                 },
                 else => {},
             }
@@ -721,7 +740,7 @@ pub const RiskStackApp = struct {
             }
         }
 
-        // Animate the freeze card flying from freezing player to frozen player.
+        // Render the freeze card flying from freezing player to frozen player.
         for (app_state.animation.queue.items) |animation| {
             switch (animation) {
                 .freeze_player => |data| {
