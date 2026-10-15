@@ -777,7 +777,7 @@ pub const GameSimulation = struct {
                 return true;
             },
             .SecondChance => {
-                try self.handleSecondChance(player, card);
+                try self.handleSecondChance(player);
                 return true;
             },
             else => {
@@ -796,10 +796,10 @@ pub const GameSimulation = struct {
         return self.result_.?;
     }
 
-    fn handleSecondChance(self: *GameSimulation, player: *Player, card: Card) error{OutOfMemory}!void {
-        if (!player.hasCard(card)) {
-            _ = player.takeCard(card);
-            try self.addEvent(.{ .DrawCard = .{ .player = player, .card = card } });
+    fn handleSecondChance(self: *GameSimulation, player: *Player) error{OutOfMemory}!void {
+        if (!player.hasCard(.SecondChance)) {
+            _ = player.takeCard(.SecondChance);
+            try self.addEvent(.{ .DrawCard = .{ .player = player, .card = .SecondChance } });
             return;
         }
 
@@ -808,7 +808,7 @@ pub const GameSimulation = struct {
         for (self.players) |*other_player| {
             if (other_player == player) continue;
             if (!other_player.is_still_in_game()) continue;
-            if (other_player.hasCard(card)) continue;
+            if (other_player.hasCard(.SecondChance)) continue;
             available_players.appendAssumeCapacity(other_player);
         }
 
@@ -818,8 +818,34 @@ pub const GameSimulation = struct {
         }
 
         const random_index = self.prng.intRangeLessThan(usize, 0, available_players.items.len);
-        _ = available_players.items[random_index].takeCard(card);
-        try self.addEvent(.{ .DrawCard = .{ .player = player, .card = card } });
+        _ = available_players.items[random_index].takeCard(.SecondChance);
+        try self.addEvent(.{ .DrawCard = .{ .player = player, .card = .SecondChance } });
+    }
+
+    test "handleSecondChance simple case" {
+        var tf = try TestFixture.init(t.allocator, 2, &[_]Card{});
+        defer tf.deinit();
+
+        const player = &tf.players[0];
+        try tf.simulation.handleSecondChance(player);
+
+        try t.expectEqual(true, player.hand.items.len == 1);
+        try t.expectEqual(true, player.hand.items[0] == .SecondChance);
+    }
+
+    test "handleSecondChance player already has a second chance on hand" {
+        var tf = try TestFixture.init(t.allocator, 2, &[_]Card{});
+        defer tf.deinit();
+
+        const player = &tf.players[0];
+        try player.hand.append(tf.allocator, .SecondChance);
+        try tf.simulation.handleSecondChance(player);
+
+        const other_player = &tf.players[1];
+        try t.expectEqual(true, player.hand.items.len == 1);
+        try t.expectEqual(true, player.hand.items[0] == .SecondChance);
+        try t.expectEqual(true, other_player.hand.items.len == 1);
+        try t.expectEqual(true, other_player.hand.items[0] == .SecondChance);
     }
 
     fn handleFreeze(self: *GameSimulation, player: *Player) !void {
@@ -896,7 +922,7 @@ pub const GameSimulation = struct {
                 continue;
             }
             if (drawn == .SecondChance) {
-                try self.handleSecondChance(target, drawn);
+                try self.handleSecondChance(target);
                 continue;
             }
 
