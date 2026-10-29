@@ -9,7 +9,7 @@ test {
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
-    const games_to_run = 100_000;
+    const games_to_run = 500_000;
 
     const SharedResults = struct {
         mutex: std.Io.Mutex = .init,
@@ -43,9 +43,15 @@ pub fn main(init: std.process.Init) !void {
 
             std.debug.print("Simulating {d} games\n", .{ctx.games});
 
+            var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+            defer arena.deinit();
+            const arena_allocator = arena.allocator();
+
             for (0..ctx.games) |_| {
+                _ = arena.reset(.retain_capacity);
+
                 const start_time = std.Io.Clock.now(.real, ctx.io);
-                const result = try runGame(ctx.allocator, ctx.prng.random());
+                const result = try runGame(arena_allocator, ctx.prng.random());
                 const end_time = std.Io.Clock.now(.real, ctx.io);
                 local_cards_played += result.cards_played;
                 local_runtime = .fromNanoseconds(local_runtime.nanoseconds + start_time.durationTo(end_time).nanoseconds);
@@ -65,47 +71,40 @@ pub fn main(init: std.process.Init) !void {
             }
         }
 
-        fn runGame(task_allocator: std.mem.Allocator, prng: std.Random) !f7.GameResult {
-            var arena = std.heap.ArenaAllocator.init(task_allocator);
-            defer arena.deinit();
-            const arena_allocator = arena.allocator();
+        fn runGame(game_allocator: std.mem.Allocator, prng: std.Random) !f7.GameResult {
+            var deck = try f7.Deck.init(game_allocator, prng);
+            defer deck.deinit(game_allocator);
 
-            var deck = try f7.Deck.init(arena_allocator, prng);
-            defer deck.deinit(arena_allocator);
-
-            var players = [_]f7.Player{
-                try .init(arena_allocator, prng, .{ .MinPoints = 20 }),
-                try .init(arena_allocator, prng, .{ .MinPoints = 30 }),
-                try .init(arena_allocator, prng, .{ .MinPoints = 40 }),
-                try .init(arena_allocator, prng, .{ .MinPoints = 50 }),
-                try .init(arena_allocator, prng, .{ .MaxCards = 3 }),
-                try .init(arena_allocator, prng, .{ .MaxCards = 4 }),
-                try .init(arena_allocator, prng, .{ .MaxCards = 5 }),
-                try .init(arena_allocator, prng, .{ .MinPointsMaxCards = .{ .min_points = 30, .max_cards = 5 } }),
-                try .init(arena_allocator, prng, .{ .MinPointsMaxCards = .{ .min_points = 30, .max_cards = 4 } }),
-                try .init(arena_allocator, prng, .{ .MinPointsMaxCards = .{ .min_points = 30, .max_cards = 3 } }),
-                try .init(arena_allocator, prng, .{ .MinPointsMaxCards = .{ .min_points = 20, .max_cards = 5 } }),
-                try .init(arena_allocator, prng, .{ .MinPointsMaxCards = .{ .min_points = 20, .max_cards = 4 } }),
-                try .init(arena_allocator, prng, .{ .MinPointsMaxCards = .{ .min_points = 20, .max_cards = 3 } }),
-                try .init(arena_allocator, prng, .Always7),
-                try .init(arena_allocator, prng, .Random),
-                try .init(arena_allocator, prng, .{ .RandomMinCards = 1 }),
-                try .init(arena_allocator, prng, .{ .RandomMinCards = 2 }),
-                try .init(arena_allocator, prng, .{ .RandomMinCards = 3 }),
-                try .init(arena_allocator, prng, .{ .RandomMinCards = 4 }),
-                try .init(arena_allocator, prng, .{ .ChanceOfFailureBelow = 0.1 }),
-                try .init(arena_allocator, prng, .{ .ChanceOfFailureBelow = 0.2 }),
-                try .init(arena_allocator, prng, .{ .ChanceOfFailureBelow = 0.3 }),
-                try .init(arena_allocator, prng, .{ .ChanceOfFailureBelow = 0.4 }),
+            const strategies = [_]f7.DrawStrategy{
+                .{ .MinPoints = 20 },
+                .{ .MinPoints = 30 },
+                .{ .MinPoints = 40 },
+                .{ .MinPoints = 50 },
+                .{ .MaxCards = 3 },
+                .{ .MaxCards = 4 },
+                .{ .MaxCards = 5 },
+                .{ .MinPointsMaxCards = .{ .min_points = 30, .max_cards = 5 } },
+                .{ .MinPointsMaxCards = .{ .min_points = 30, .max_cards = 4 } },
+                .{ .MinPointsMaxCards = .{ .min_points = 30, .max_cards = 3 } },
+                .{ .MinPointsMaxCards = .{ .min_points = 20, .max_cards = 5 } },
+                .{ .MinPointsMaxCards = .{ .min_points = 20, .max_cards = 4 } },
+                .{ .MinPointsMaxCards = .{ .min_points = 20, .max_cards = 3 } },
+                .Always7,
+                .Random,
+                .{ .RandomMinCards = 1 },
+                .{ .RandomMinCards = 2 },
+                .{ .RandomMinCards = 3 },
+                .{ .RandomMinCards = 4 },
+                .{ .ChanceOfFailureBelow = 0.1 },
+                .{ .ChanceOfFailureBelow = 0.2 },
+                .{ .ChanceOfFailureBelow = 0.3 },
+                .{ .ChanceOfFailureBelow = 0.4 },
             };
-            defer {
-                for (&players) |*player| {
-                    player.deinit(arena_allocator);
-                }
-            }
 
-            var simulation = try f7.GameSimulation.init(arena_allocator, prng, &deck, &players);
+            var simulation = try f7.GameSimulation.init(game_allocator, prng, &strategies);
             defer simulation.deinit();
+
+            simulation.logging_enabled = false;
 
             while (try simulation.step()) {}
             return simulation.result();

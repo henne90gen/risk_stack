@@ -170,8 +170,6 @@ const AppState = struct {
     cards: CardTextures = .{},
 
     prng: std.Random,
-    players: [3]f.Player,
-    deck: f.Deck,
     simulation: f.GameSimulation = undefined,
     flip_three_stack: std.ArrayList(FlipThreeStackEntry),
     should_run_next_step: bool = false,
@@ -180,17 +178,10 @@ const AppState = struct {
     pub fn init(allocator: std.mem.Allocator, seed: u64) !AppState {
         var r = std.Random.DefaultPrng.init(seed);
         const prng = r.random();
-        const deck = try f.Deck.init(allocator, prng);
         return AppState{
             .allocator = allocator,
             .animation = try AnimationState.init(allocator),
             .prng = prng,
-            .players = [_]f.Player{
-                try .init(allocator, prng, f.DrawStrategy{ .MinPoints = 20 }),
-                try .init(allocator, prng, f.DrawStrategy{ .MinPoints = 30 }),
-                try .init(allocator, prng, f.DrawStrategy{ .MinPoints = 40 }),
-            },
-            .deck = deck,
             .flip_three_stack = try std.ArrayList(FlipThreeStackEntry).initCapacity(allocator, 3),
         };
     }
@@ -205,7 +196,11 @@ var app_state: AppState = undefined;
 pub const RiskStackApp = struct {
     pub fn onInit(seed: c_ulong) void {
         app_state = AppState.init(std.heap.page_allocator, seed) catch @panic("failed to initialize app state");
-        app_state.simulation = f.GameSimulation.init(app_state.allocator, app_state.prng, &app_state.deck, &app_state.players) catch @panic("failed to initialize game simulation");
+        app_state.simulation = f.GameSimulation.init(app_state.allocator, app_state.prng, &[_]f.DrawStrategy{
+            f.DrawStrategy{ .MinPoints = 20 },
+            f.DrawStrategy{ .MinPoints = 30 },
+            f.DrawStrategy{ .MinPoints = 40 },
+        }) catch @panic("failed to initialize game simulation");
 
         const vert = glInitShader(vert_src, vert_src.len, p.GL_VERTEX_SHADER) catch std.debug.panic("vertex shader compilation failed", .{});
         const frag = glInitShader(frag_src, frag_src.len, p.GL_FRAGMENT_SHADER) catch std.debug.panic("fragment shader compilation failed", .{});
@@ -380,6 +375,12 @@ pub const RiskStackApp = struct {
             },
             p.Key.Space => {
                 app_state.should_run_next_step = true;
+            },
+            p.Key.S => {
+                saveSzenario() catch |err| {
+                    p.logInfo("{}", .{err});
+                    p.logInfo("saving szenario - failed", .{});
+                };
             },
             else => p.logInfo("onKeyDown: {}", .{key}),
         }
@@ -585,10 +586,10 @@ pub const RiskStackApp = struct {
         try addCard(frame_allocator, &instances, &app_state.cards, back_texture_index, 0.0, 0.0, std.math.pi, card_w, card_h);
 
         // Players arranged in a circle.
-        const num_players = app_state.players.len;
+        const num_players = app_state.simulation.players.len;
         const radius: f32 = 0.5;
         const text_radius: f32 = 0.7;
-        for (&app_state.players, 0..) |*player, pi| {
+        for (app_state.simulation.players, 0..) |*player, pi| {
             // Spread players evenly; first player starts at the bottom.
             const base_angle: f32 = -std.math.pi / 2.0 +
                 @as(f32, @floatFromInt(pi)) * (2.0 * std.math.pi / @as(f32, @floatFromInt(num_players)));
@@ -761,8 +762,8 @@ pub const RiskStackApp = struct {
                         }
                     }.call;
 
-                    const freezing_angles = playerAngles(&app_state.players, data.freezing_player);
-                    const frozen_angles = playerAngles(&app_state.players, data.frozen_player);
+                    const freezing_angles = playerAngles(app_state.simulation.players, data.freezing_player);
+                    const frozen_angles = playerAngles(app_state.simulation.players, data.frozen_player);
 
                     const src_x = radius * @cos(freezing_angles.base);
                     const src_y = radius * @sin(freezing_angles.base);
@@ -803,6 +804,14 @@ pub const RiskStackApp = struct {
         p.glBindVertexArray(0);
         p.glBindTexture(p.GL_TEXTURE_2D, 0);
         p.glUseProgram(0);
+    }
+
+    fn saveSzenario() !void {
+        p.logInfo("saving szenario...", .{});
+        const s = try app_state.simulation.save(app_state.allocator);
+        defer app_state.allocator.free(s);
+        p.logInfo("{s}", .{s});
+        p.logInfo("saving szenario - done", .{});
     }
 };
 

@@ -661,7 +661,8 @@ pub const GameResult = struct {
 pub const GameSimulation = struct {
     allocator: std.mem.Allocator,
     prng: std.Random,
-    deck: *Deck,
+    logging_enabled: bool,
+    deck: Deck,
     players: []Player,
     player_selection_buffer: []*Player,
     current_player_index: u32,
@@ -671,11 +672,16 @@ pub const GameSimulation = struct {
 
     result_: ?GameResult = null,
 
-    pub fn init(allocator: std.mem.Allocator, prng: std.Random, deck: *Deck, players: []Player) !GameSimulation {
+    pub fn init(allocator: std.mem.Allocator, prng: std.Random, players_init: []const DrawStrategy) !GameSimulation {
+        const players = try allocator.alloc(Player, players_init.len);
+        for (players, 0..) |*player, i| {
+            player.* = try Player.init(allocator, prng, players_init[i]);
+        }
         return GameSimulation{
             .allocator = allocator,
             .prng = prng,
-            .deck = deck,
+            .logging_enabled = false,
+            .deck = try Deck.init(allocator, prng),
             .players = players,
             .player_selection_buffer = try allocator.alloc(*Player, players.len),
             .current_player_index = 0,
@@ -684,15 +690,17 @@ pub const GameSimulation = struct {
     }
 
     pub fn deinit(self: *GameSimulation) void {
+        for (self.players) |*player| player.deinit(self.allocator);
+        self.allocator.free(self.players);
         self.allocator.free(self.player_selection_buffer);
         self.events.deinit(self.allocator);
+        self.deck.deinit(self.allocator);
     }
 
     pub fn step(self: *GameSimulation) !bool {
         self.log("Step: current_player_index = {}, cards_played = {}, deck_size = {}", .{ self.current_player_index, self.cards_played, self.deck.cards.items.len });
 
         if (self.result_ != null) {
-            // game simulation is already finished
             self.log("Game simulation is already finished", .{});
             return false;
         }
@@ -757,7 +765,7 @@ pub const GameSimulation = struct {
             self.current_player_index = 0;
         }
 
-        if (!player.decideTakeCard(self.deck)) {
+        if (!player.decideTakeCard(&self.deck)) {
             player.endRound();
             try self.addEvent(.{ .PlayerEndRound = .{ .player = player, .score = player.score } });
             return true;
@@ -826,7 +834,7 @@ pub const GameSimulation = struct {
         var tf = try TestFixture.init(t.allocator, 2, &[_]Card{});
         defer tf.deinit();
 
-        const player = &tf.players[0];
+        const player = &tf.simulation.players[0];
         try tf.simulation.handleSecondChance(player);
 
         try t.expectEqual(true, player.hand.items.len == 1);
@@ -837,11 +845,11 @@ pub const GameSimulation = struct {
         var tf = try TestFixture.init(t.allocator, 2, &[_]Card{});
         defer tf.deinit();
 
-        const player = &tf.players[0];
+        const player = &tf.simulation.players[0];
         try player.hand.append(tf.allocator, .SecondChance);
         try tf.simulation.handleSecondChance(player);
 
-        const other_player = &tf.players[1];
+        const other_player = &tf.simulation.players[1];
         try t.expectEqual(true, player.hand.items.len == 1);
         try t.expectEqual(true, player.hand.items[0] == .SecondChance);
         try t.expectEqual(true, other_player.hand.items.len == 1);
@@ -878,20 +886,20 @@ pub const GameSimulation = struct {
         var tf = try TestFixture.init(t.allocator, 2, &[_]Card{});
         defer tf.deinit();
 
-        const freezing_player = &tf.players[0];
+        const freezing_player = &tf.simulation.players[0];
         try tf.simulation.handleFreeze(freezing_player);
 
-        const frozen_player = &tf.players[1];
+        const frozen_player = &tf.simulation.players[1];
         try t.expectEqual(true, frozen_player.state == .Frozen);
     }
 
     test "handleFreeze other player is already frozen" {
         var tf = try TestFixture.init(t.allocator, 2, &[_]Card{});
         defer tf.deinit();
-        const frozen_player = &tf.players[1];
+        const frozen_player = &tf.simulation.players[1];
         frozen_player.freeze();
 
-        const freezing_player = &tf.players[0];
+        const freezing_player = &tf.simulation.players[0];
         try tf.simulation.handleFreeze(freezing_player);
 
         try t.expectEqual(true, frozen_player.state == .Frozen);
@@ -978,10 +986,10 @@ pub const GameSimulation = struct {
         var tf = try TestFixture.init(t.allocator, 2, &[_]Card{ .One, .Two, .Three });
         defer tf.deinit();
 
-        const drawing_player = &tf.players[0];
+        const drawing_player = &tf.simulation.players[0];
         try tf.simulation.handleFlipThree(drawing_player);
 
-        const other_player = &tf.players[1];
+        const other_player = &tf.simulation.players[1];
         try t.expectEqual(true, other_player.is_still_in_game());
         try t.expectEqual(3, other_player.hand.items.len);
         try t.expectEqual(.Three, other_player.hand.items[0]);
@@ -993,10 +1001,10 @@ pub const GameSimulation = struct {
         var tf = try TestFixture.init(t.allocator, 2, &[_]Card{ .One, .Two, .Three, .FlipThree, .Four, .Five });
         defer tf.deinit();
 
-        const drawing_player = &tf.players[0];
+        const drawing_player = &tf.simulation.players[0];
         try tf.simulation.handleFlipThree(drawing_player);
 
-        const other_player = &tf.players[1];
+        const other_player = &tf.simulation.players[1];
         try t.expectEqual(true, other_player.is_still_in_game());
         try t.expectEqual(2, other_player.hand.items.len);
         try t.expectEqual(.Five, other_player.hand.items[0]);
@@ -1023,10 +1031,10 @@ pub const GameSimulation = struct {
         });
         defer tf.deinit();
 
-        const drawing_player = &tf.players[0];
+        const drawing_player = &tf.simulation.players[0];
         try tf.simulation.handleFlipThree(drawing_player);
 
-        const other_player = &tf.players[1];
+        const other_player = &tf.simulation.players[1];
         try t.expectEqual(true, other_player.is_still_in_game());
         try t.expectEqual(1, other_player.hand.items.len);
         try t.expectEqual(.Seven, other_player.hand.items[0]);
@@ -1049,10 +1057,10 @@ pub const GameSimulation = struct {
         });
         defer tf.deinit();
 
-        const drawing_player = &tf.players[0];
+        const drawing_player = &tf.simulation.players[0];
         try tf.simulation.handleFlipThree(drawing_player);
 
-        const other_player = &tf.players[1];
+        const other_player = &tf.simulation.players[1];
         try t.expectEqual(true, other_player.is_still_in_game());
         try t.expectEqual(2, other_player.hand.items.len);
         try t.expectEqual(.Two, other_player.hand.items[0]);
@@ -1069,10 +1077,10 @@ pub const GameSimulation = struct {
         });
         defer tf.deinit();
 
-        const drawing_player = &tf.players[0];
+        const drawing_player = &tf.simulation.players[0];
         try tf.simulation.handleFlipThree(drawing_player);
 
-        const other_player = &tf.players[1];
+        const other_player = &tf.simulation.players[1];
         try t.expectEqual(false, other_player.is_still_in_game());
         try t.expectEqual(1, other_player.hand.items.len);
         try t.expectEqual(.One, other_player.hand.items[0]);
@@ -1080,12 +1088,101 @@ pub const GameSimulation = struct {
         try t.expectEqual(false, drawing_player.is_still_in_game());
     }
 
+    const SavedPlayer = struct {
+        hand: []Card,
+        score: u32,
+    };
+    const Saved = struct {
+        deck: []Card,
+        discarded: []Card,
+        players: []SavedPlayer,
+
+        pub fn deinit(self_: *const @This(), allocator_: std.mem.Allocator) void {
+            allocator_.free(self_.deck);
+            allocator_.free(self_.discarded);
+            for (self_.players) |player| {
+                allocator_.free(player.hand);
+            }
+            allocator_.free(self_.players);
+        }
+    };
+
+    pub fn save(self: *GameSimulation, allocator: std.mem.Allocator) ![]const u8 {
+        const saved = Saved{
+            .deck = try allocator.dupe(Card, self.deck.cards.items),
+            .discarded = try allocator.dupe(Card, self.deck.discarded.items),
+            .players = try allocator.alloc(SavedPlayer, self.players.len),
+        };
+        for (saved.players, 0..) |*player, i| {
+            const p = &self.players[i];
+            player.hand = try allocator.dupe(Card, p.hand.items);
+            player.score = p.score;
+        }
+        defer saved.deinit(allocator);
+        return try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(saved, .{})});
+    }
+
+    test "save" {
+        var tf = try TestFixture.init(t.allocator, 2, &[_]Card{});
+        defer tf.deinit();
+
+        const s = try tf.simulation.save(tf.allocator);
+        defer tf.allocator.free(s);
+        try t.expectEqualStrings(
+            \\{"deck":["Eight","Eight","Eight","Three","Ten","Three","SecondChance","SecondChance","Eight","Five","One","Six","Six","Five","Six","Ten","Eleven","Seven","Nine","Ten","Nine","Zero","Seven","Six","Ten","Ten","Two","Twelve","PlusTwo","Eight","Four","Ten","Ten","FlipThree","FlipThree","Ten","Eleven","Six","Twelve","Two","Seven","Eleven","Eleven","Nine","Nine","Eight","Nine","Seven","Seven","Twelve","Twelve","Twelve","Four","Eleven","Eight","Ten","Freeze","Ten","Twelve","Three","Four","Seven","Eleven","Eleven","PlusEight","FlipThree","Nine","Twelve","Eight","Five","PlusFour","Twelve","Five","Eleven","Twelve","Freeze","Four","Twelve","Seven","Eleven","SecondChance","Five","Eleven","Eleven","Six","TimesTwo","PlusSix","PlusTen","Freeze","Twelve","Twelve","Nine","Nine","Nine"],"discarded":[],"players":[{"hand":[],"score":0},{"hand":[],"score":0}]}
+        , s);
+    }
+
+    pub fn load(self: *GameSimulation, allocator: std.mem.Allocator, input: []const u8) !void {
+        const saved = try std.json.parseFromSlice(Saved, allocator, input, .{});
+        defer saved.deinit();
+
+        self.deck.cards.clearRetainingCapacity();
+        try self.deck.cards.appendSlice(allocator, saved.value.deck);
+
+        for (self.players) |*player| player.deinit(self.allocator);
+        allocator.free(self.players);
+        self.players = try allocator.alloc(Player, saved.value.players.len);
+        for (self.players, 0..) |*player, i| {
+            player.hand = try std.ArrayList(Card).initCapacity(allocator, saved.value.players[i].hand.len);
+            try player.hand.appendSlice(allocator, saved.value.players[i].hand);
+            player.score = saved.value.players[i].score;
+        }
+    }
+
+    test "load" {
+        var tf = try TestFixture.init(t.allocator, 2, &[_]Card{});
+        defer tf.deinit();
+
+        try tf.simulation.load(tf.allocator,
+            \\{"deck":["Eight","Eight","Eight","Three","Ten","Three","SecondChance","SecondChance","Eight","Five","One","Six","Six","Five","Six","Ten","Eleven","Seven","Nine","Ten","Nine","Zero","Seven","Six","Ten","Ten","Two","Twelve","PlusTwo","Eight","Four","Ten","Ten","FlipThree","FlipThree","Ten","Eleven","Six","Twelve","Two","Seven","Eleven","Eleven","Nine","Nine","Eight","Nine","Seven","Seven","Twelve","Twelve","Twelve","Four","Eleven","Eight","Ten","Freeze","Ten","Twelve","Three","Four","Seven","Eleven","Eleven","PlusEight","FlipThree","Nine","Twelve","Eight","Five","PlusFour","Twelve","Five","Eleven","Twelve","Freeze","Four","Twelve","Seven","Eleven","SecondChance","Five","Eleven","Eleven","Six","TimesTwo","PlusSix","PlusTen","Freeze","Twelve","Twelve","Nine","Nine","Nine"],"discarded":[],"players":[{"hand":[],"score":0},{"hand":[],"score":0}]}
+        );
+
+        const expected_cards = [_]Card{ .Eight, .Eight, .Eight, .Three, .Ten, .Three, .SecondChance, .SecondChance, .Eight, .Five, .One, .Six, .Six, .Five, .Six, .Ten, .Eleven, .Seven, .Nine, .Ten, .Nine, .Zero, .Seven, .Six, .Ten, .Ten, .Two, .Twelve, .PlusTwo, .Eight, .Four, .Ten, .Ten, .FlipThree, .FlipThree, .Ten, .Eleven, .Six, .Twelve, .Two, .Seven, .Eleven, .Eleven, .Nine, .Nine, .Eight, .Nine, .Seven, .Seven, .Twelve, .Twelve, .Twelve, .Four, .Eleven, .Eight, .Ten, .Freeze, .Ten, .Twelve, .Three, .Four, .Seven, .Eleven, .Eleven, .PlusEight, .FlipThree, .Nine, .Twelve, .Eight, .Five, .PlusFour, .Twelve, .Five, .Eleven, .Twelve, .Freeze, .Four, .Twelve, .Seven, .Eleven, .SecondChance, .Five, .Eleven, .Eleven, .Six, .TimesTwo, .PlusSix, .PlusTen, .Freeze, .Twelve, .Twelve, .Nine, .Nine, .Nine };
+
+        for (expected_cards, 0..) |card, i| {
+            try t.expectEqual(card, tf.simulation.deck.cards.items[i]);
+        }
+        try t.expectEqual(0, tf.simulation.deck.discarded.items.len);
+        try t.expectEqual(2, tf.simulation.players.len);
+
+        const player_one = tf.simulation.players[0];
+        try t.expectEqual(0, player_one.hand.items.len);
+        try t.expectEqual(0, player_one.score);
+
+        const player_two = tf.simulation.players[1];
+        try t.expectEqual(0, player_two.hand.items.len);
+        try t.expectEqual(0, player_two.score);
+    }
+
     fn addEvent(self: *GameSimulation, event: GameEvent) !void {
         try self.events.append(self.allocator, event);
     }
 
     fn log(self: *GameSimulation, comptime fmt: []const u8, args: anytype) void {
-        _ = self;
+        if (!self.logging_enabled) {
+            return;
+        }
         const is_wasm = @import("builtin").target.cpu.arch == .wasm32;
         if (!is_wasm) {
             std.debug.print(fmt ++ "\n", args);
@@ -1096,8 +1193,6 @@ pub const GameSimulation = struct {
 const TestFixture = struct {
     allocator: std.mem.Allocator = undefined,
     r: std.Random.Xoshiro256 = undefined,
-    deck: Deck = undefined,
-    players: []Player = undefined,
     simulation: GameSimulation = undefined,
 
     pub fn init(
@@ -1111,27 +1206,23 @@ const TestFixture = struct {
         result_.r = std.Random.DefaultPrng.init(0);
         const prng = result_.r.random();
 
-        result_.deck = try Deck.init(allocator, prng);
-
-        result_.players = try allocator.alloc(Player, num_players);
-        for (result_.players) |*player| {
-            player.* = try .init(allocator, prng, .Random);
+        const draw_strategies = try allocator.alloc(DrawStrategy, num_players);
+        defer allocator.free(draw_strategies);
+        for (draw_strategies) |*strat| {
+            strat.* = .Random;
         }
+
+        result_.simulation = try GameSimulation.init(allocator, prng, draw_strategies);
 
         for (top_cards) |card| {
-            try result_.deck.cards.append(allocator, card);
+            try result_.simulation.deck.cards.append(allocator, card);
         }
-
-        result_.simulation = try GameSimulation.init(allocator, prng, &result_.deck, result_.players);
 
         return result_;
     }
 
     pub fn deinit(self: *TestFixture) void {
         self.simulation.deinit();
-        for (self.players) |*player| player.deinit(self.allocator);
-        self.allocator.free(self.players);
-        self.deck.deinit(self.allocator);
         self.allocator.destroy(self);
     }
 };
