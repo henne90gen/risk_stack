@@ -658,10 +658,16 @@ pub const GameResult = struct {
     cards_played: u64,
 };
 
+pub const Settings = struct {
+    logging_enabled: bool = false,
+    events_enabled: bool = false,
+};
+
 pub const GameSimulation = struct {
     allocator: std.mem.Allocator,
     prng: std.Random,
-    logging_enabled: bool,
+    settings: Settings,
+
     deck: Deck,
     players: []Player,
     player_selection_buffer: []*Player,
@@ -680,7 +686,7 @@ pub const GameSimulation = struct {
         return GameSimulation{
             .allocator = allocator,
             .prng = prng,
-            .logging_enabled = false,
+            .settings = .{},
             .deck = try Deck.init(allocator, prng),
             .players = players,
             .player_selection_buffer = try allocator.alloc(*Player, players.len),
@@ -1176,11 +1182,14 @@ pub const GameSimulation = struct {
     }
 
     fn addEvent(self: *GameSimulation, event: GameEvent) !void {
+        if (!self.settings.events_enabled) {
+            return;
+        }
         try self.events.append(self.allocator, event);
     }
 
     fn log(self: *GameSimulation, comptime fmt: []const u8, args: anytype) void {
-        if (!self.logging_enabled) {
+        if (!self.settings.logging_enabled) {
             return;
         }
         const is_wasm = @import("builtin").target.cpu.arch == .wasm32;

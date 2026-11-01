@@ -30,6 +30,25 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_tests.step);
     }
 
+    { // gen-cards executable
+        const exe_mod = b.createModule(.{
+            .root_source_file = b.path("src/cards/gen_cards.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        const exe = b.addExecutable(.{
+            .name = "gen_cards",
+            .root_module = exe_mod,
+        });
+        b.installArtifact(exe);
+
+        const run_cmd = b.addRunArtifact(exe);
+        run_cmd.step.dependOn(b.getInstallStep());
+        if (b.args) |args| run_cmd.addArgs(args);
+        const run_step = b.step("run-gen-cards", "Run the card generation");
+        run_step.dependOn(&run_cmd.step);
+    }
+
     const freetype_dep = b.dependency("freetype", .{});
     const zlib_dep_ft = b.dependency("zlib", .{});
     const freetype = buildFreetype(b, target, optimize, freetype_dep, zlib_dep_ft, false);

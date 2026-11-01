@@ -202,6 +202,9 @@ pub const RiskStackApp = struct {
             f.DrawStrategy{ .MinPoints = 40 },
         }) catch @panic("failed to initialize game simulation");
 
+        app_state.simulation.settings.logging_enabled = true;
+        app_state.simulation.settings.events_enabled = true;
+
         const vert = glInitShader(vert_src, vert_src.len, p.GL_VERTEX_SHADER) catch std.debug.panic("vertex shader compilation failed", .{});
         const frag = glInitShader(frag_src, frag_src.len, p.GL_FRAGMENT_SHADER) catch std.debug.panic("fragment shader compilation failed", .{});
         app_state.gl.tri_program = glLinkShaderProgram(vert, frag) catch std.debug.panic("shader program linking failed", .{});
@@ -887,7 +890,7 @@ fn loadCardTextures(allocator: std.mem.Allocator, texture_paths: []const []const
             return error.InconsistentCardPixelDimensions;
         }
 
-        p.logInfo("\nAdding card '{s}' ({})", .{ path, i });
+        p.logInfo("Adding card '{s}' ({})", .{ path, i });
 
         const start_row = (@divTrunc(i, cards_per_row)) * card_height;
         const start_col = (i % cards_per_row) * card_width;

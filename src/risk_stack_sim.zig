@@ -104,8 +104,6 @@ pub fn main(init: std.process.Init) !void {
             var simulation = try f7.GameSimulation.init(game_allocator, prng, &strategies);
             defer simulation.deinit();
 
-            simulation.logging_enabled = false;
-
             while (try simulation.step()) {}
             return simulation.result();
         }
