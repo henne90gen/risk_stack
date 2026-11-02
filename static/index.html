@@ -57,6 +57,31 @@
                         console.error(getString(ptr, len));
                     },
 
+                    // Backing for platform.writeStorage/readStorage.
+                    storageWrite(namePtr, nameLen, dataPtr, dataLen) {
+                        localStorage.setItem(
+                            getString(namePtr, nameLen),
+                            getString(dataPtr, dataLen),
+                        );
+                    },
+                    storageLength(namePtr, nameLen) {
+                        const value = localStorage.getItem(
+                            getString(namePtr, nameLen),
+                        );
+                        return value === null
+                            ? -1
+                            : new TextEncoder().encode(value).length;
+                    },
+                    storageRead(namePtr, nameLen, bufPtr, bufLen) {
+                        const value =
+                            localStorage.getItem(getString(namePtr, nameLen)) ??
+                            "";
+                        new TextEncoder().encodeInto(
+                            value,
+                            new Uint8Array(wasmMemory.buffer, bufPtr, bufLen),
+                        );
+                    },
+
                     // Backing for the Zig-side std.Io (see main_wasm.zig).
                     dateNow() {
                         return Date.now();
@@ -69,7 +94,6 @@
                             new Uint8Array(wasmMemory.buffer, ptr, len),
                         );
                     },
-
 
                     ...webgl,
                 };

@@ -145,6 +145,12 @@ const Animation = union(enum) {
         frozen_player: *f.Player,
         t: f32 = 0.0,
     },
+    flip_three_start: struct {
+        player: *f.Player,
+        target: *f.Player,
+        t: f32 = 0.0,
+    },
+    flip_three_end: struct {},
 };
 
 const AnimationState = struct {
@@ -181,6 +187,13 @@ const AppState = struct {
     simulation: f.GameSimulation = undefined,
     flip_three_stack: std.ArrayList(FlipThreeStackEntry),
     should_run_next_step: bool = false,
+    /// Steps still to run on their own, from `--steps`.
+    auto_steps: u32 = 0,
+    /// Set by `--steps`: close once the steps and their animations are done.
+    close_after_auto_steps: bool = false,
+    /// Where S saves and L loads the simulation state; a file on native, a
+    /// localStorage entry in the browser. Set with `--scenario`.
+    scenario_path: []const u8 = "scenario.json",
     next_event_to_process_index: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) !AppState {
@@ -214,9 +227,9 @@ const AppState = struct {
 var app_state: AppState = undefined;
 
 pub const RiskStackApp = struct {
-    pub fn onInit(gpa: std.mem.Allocator, io: std.Io) void {
+    pub fn onInit(gpa: std.mem.Allocator, io: std.Io, options: p.Options) void {
         app_state = AppState.init(gpa, io) catch @panic("failed to initialize app state");
-        app_state.simulation = f.GameSimulation.init(app_state.allocator, app_state.prng.random(), &[_]f.DrawStrategy{
+        app_state.simulation = f.GameSimulation.init(app_state.allocator, &app_state.prng, &[_]f.DrawStrategy{
             f.DrawStrategy{ .MinPoints = 20 },
             f.DrawStrategy{ .MinPoints = 30 },
             f.DrawStrategy{ .MinPoints = 40 },
@@ -224,6 +237,16 @@ pub const RiskStackApp = struct {
 
         app_state.simulation.settings.logging_enabled = true;
         app_state.simulation.settings.events_enabled = true;
+
+        if (options.scenario) |path| {
+            app_state.scenario_path = path;
+            loadScenario() catch |err| {
+                p.logErr("loading scenario '{s}' failed: {}", .{ path, err });
+                if (!p.is_wasm) std.process.exit(1);
+            };
+        }
+        app_state.auto_steps = options.steps;
+        app_state.close_after_auto_steps = options.steps > 0;
 
         const vert = glInitShader(vert_src, vert_src.len, p.GL_VERTEX_SHADER) catch std.debug.panic("vertex shader compilation failed", .{});
         const frag = glInitShader(frag_src, frag_src.len, p.GL_FRAGMENT_SHADER) catch std.debug.panic("fragment shader compilation failed", .{});
@@ -379,12 +402,8 @@ pub const RiskStackApp = struct {
             p.Key.Space => {
                 app_state.should_run_next_step = true;
             },
-            p.Key.S => {
-                saveSzenario() catch |err| {
-                    p.logInfo("{}", .{err});
-                    p.logInfo("saving szenario - failed", .{});
-                };
-            },
+            p.Key.S => saveScenario() catch |err| p.logErr("saving scenario failed: {}", .{err}),
+            p.Key.L => loadScenario() catch |err| p.logErr("loading scenario failed: {}", .{err}),
             else => p.logInfo("onKeyDown: {}", .{key}),
         }
     }
@@ -445,17 +464,43 @@ pub const RiskStackApp = struct {
                         _ = app_state.animation.queue.orderedRemove(0);
                     }
                 },
+                .flip_three_start => |*data| {
+                    data.t += 0.03;
+                    if (data.t >= 1.0) {
+                        try app_state.flip_three_stack.append(app_state.allocator, .{ .player = data.player, .target = data.target });
+                        _ = app_state.animation.queue.orderedRemove(0);
+                    }
+                },
+                .flip_three_end => {
+                    // FlipThrees nest (a FlipThree drawn during one targets
+                    // someone else), so starts and ends pair up like a stack.
+                    _ = app_state.flip_three_stack.pop();
+                    _ = app_state.animation.queue.orderedRemove(0);
+                },
             }
             return;
         }
 
-        if (!app_state.should_run_next_step) {
+        // All animations are done here; the last step has been shown.
+        if (app_state.close_after_auto_steps and app_state.auto_steps == 0) {
+            p.logInfo("ran the requested --steps, closing", .{});
+            app_state.close_after_auto_steps = false;
+            p.close();
+            return;
+        }
+
+        const auto_step = app_state.auto_steps > 0;
+        if (auto_step) {
+            app_state.auto_steps -= 1;
+        } else if (!app_state.should_run_next_step) {
             return;
         }
         app_state.resetInputTracking();
 
         const game_should_continue = try app_state.simulation.step();
         if (!game_should_continue) {
+            // Nothing left to show; don't wait for steps that can't happen.
+            app_state.auto_steps = 0;
             const game_result = app_state.simulation.result();
             p.logInfo("game finished -> strategy {} won", .{game_result.winning_strategy});
             return;
@@ -481,10 +526,11 @@ pub const RiskStackApp = struct {
                 .PlayerFrozen => |data| {
                     try app_state.animation.queue.append(app_state.allocator, .{ .freeze_player = .{ .freezing_player = data.freezing_player, .frozen_player = data.frozen_player } });
                 },
+                .FlipThreeStarted => |data| {
+                    try app_state.animation.queue.append(app_state.allocator, .{ .flip_three_start = .{ .player = data.player, .target = data.target } });
+                },
                 .FlipThreeEnded => {
-                    // if (app_state.flip_three_count > 0) {
-                    //     app_state.flip_three_count -= 1;
-                    // }
+                    try app_state.animation.queue.append(app_state.allocator, .{ .flip_three_end = .{} });
                 },
                 else => {},
             }
@@ -626,13 +672,14 @@ pub const RiskStackApp = struct {
             }
         }.call;
 
-
         // Deck: single face-down card at the center.
         try addCard(frame_allocator, &instances, &app_state.cards, back_texture_index, 0.0, 0.0, std.math.pi, card_w, card_h);
 
         // Players arranged in a circle.
         const num_players = app_state.simulation.players.len;
         const radius: f32 = 0.5;
+        // Distance from the center for cards placed in front of a player.
+        const front_distance: f32 = radius - card_h * 1.2;
         const text_radius: f32 = 0.7;
         for (app_state.simulation.players, 0..) |*player, pi| {
             // Spread players evenly; first player starts at the bottom.
@@ -673,10 +720,9 @@ pub const RiskStackApp = struct {
                 .scale = font_scale,
             });
 
+            // No early exit for an empty hand: the Freeze/FlipThree cards below
+            // must still be drawn, e.g. when Freeze is a player's first card.
             const n = player.hand.items.len;
-            if (n == 0) {
-                continue;
-            }
 
             // Count how many deal_card animations are pending in the queue for this player
             // (excluding special cards). The first matching animation is active; the rest
@@ -704,7 +750,7 @@ pub const RiskStackApp = struct {
 
             const tapped_spacing: f32 = card_h * 1.1;
             const effective_spacing: f32 = if (player.state == .Eliminated) tapped_spacing else card_spacing;
-            const total_width: f32 = @as(f32, @floatFromInt(n - 1)) * effective_spacing;
+            const total_width: f32 = @as(f32, @floatFromInt(n -| 1)) * effective_spacing;
             for (player.hand.items, 0..) |card, ci| {
                 // Skip cards that are still waiting in the animation queue.
                 if (ci >= visible_card_count) continue;
@@ -755,7 +801,9 @@ pub const RiskStackApp = struct {
                         // var cx = px + perp_x * offset;
                         // var cy = py + perp_y * offset;
 
-                        const result_pos = zm.lerp(zm.f32x4(0.0, 0.0, 0.0, 0.0), zm.f32x4(px, py, 0.0, 0.0), data.t);
+                        // FlipThree lands in front of the player, where its flight to the target starts.
+                        const dst = if (data.card == .FlipThree) frontOf(seatOf(app_state.simulation.players, player), front_distance) else .{ px, py };
+                        const result_pos = zm.lerp(zm.f32x4(0.0, 0.0, 0.0, 0.0), zm.f32x4(dst[0], dst[1], 0.0, 0.0), data.t);
                         const cx = result_pos[0];
                         const cy = result_pos[1];
 
@@ -784,7 +832,39 @@ pub const RiskStackApp = struct {
                 const freeze_card_cy = py;
                 try addCard(frame_allocator, &instances, &app_state.cards, freeze_card_idx, freeze_card_cx, freeze_card_cy, freeze_card_angle, card_w, card_h);
             }
+
+            // FlipThree cards targeting this player stay in front of them until FlipThreeEnded.
+            var stacked: f32 = 0.0;
+            for (app_state.flip_three_stack.items) |entry| {
+                if (entry.target != player) continue;
+                const pos = frontOf(seatOf(app_state.simulation.players, player), front_distance);
+                const shift = stacked * card_w * 0.3;
+                try addCard(frame_allocator, &instances, &app_state.cards, cardTextureIndex(.FlipThree), pos[0] + perp_x * shift, pos[1] + perp_y * shift, card_angle, card_w, card_h);
+                stacked += 1.0;
+            }
         }
+
+        // Render the FlipThree card flying from the player who drew it to its target.
+        if (app_state.animation.queue.items.len > 0) switch (app_state.animation.queue.items[0]) {
+            .flip_three_start => |data| {
+                const src = seatOf(app_state.simulation.players, data.player);
+                const dst = seatOf(app_state.simulation.players, data.target);
+                const src_pos = frontOf(src, front_distance);
+                const dst_pos = frontOf(dst, front_distance);
+                try addCard(
+                    frame_allocator,
+                    &instances,
+                    &app_state.cards,
+                    cardTextureIndex(.FlipThree),
+                    std.math.lerp(src_pos[0], dst_pos[0], data.t),
+                    std.math.lerp(src_pos[1], dst_pos[1], data.t),
+                    lerpAngle(src.card_angle, dst.card_angle, data.t),
+                    card_w,
+                    card_h,
+                );
+            },
+            else => {},
+        };
 
         // Render the freeze card flying from freezing player to frozen player.
         for (app_state.animation.queue.items) |animation| {
@@ -839,14 +919,64 @@ pub const RiskStackApp = struct {
         drawInstances(instances.items);
     }
 
-    fn saveSzenario() !void {
-        p.logInfo("saving szenario...", .{});
+    fn saveScenario() !void {
         const s = try app_state.simulation.save(app_state.allocator);
         defer app_state.allocator.free(s);
-        p.logInfo("{s}", .{s});
-        p.logInfo("saving szenario - done", .{});
+        try p.writeStorage(app_state.io, app_state.scenario_path, s);
+        p.logInfo("saved scenario to {s}", .{app_state.scenario_path});
+    }
+
+    fn loadScenario() !void {
+        const s = try p.readStorage(app_state.io, app_state.allocator, app_state.scenario_path);
+        defer app_state.allocator.free(s);
+        try app_state.simulation.load(s);
+
+        // Pending animations point at the replaced players.
+        app_state.animation.queue.clearRetainingCapacity();
+        app_state.flip_three_stack.clearRetainingCapacity();
+        app_state.next_event_to_process_index = 0;
+        // A click or Space from before the load must not advance the new state.
+        app_state.should_run_next_step = false;
+        p.logInfo("loaded scenario from {s}", .{app_state.scenario_path});
     }
 };
+
+/// Where a player sits at the table, matching the layout in `render`.
+const Seat = struct {
+    /// Angle of the player around the table center.
+    base_angle: f32,
+    /// Orientation of the player's cards, facing the center.
+    card_angle: f32,
+};
+
+fn seatOf(players: []const f.Player, player: *const f.Player) Seat {
+    const index = for (players, 0..) |*pl, i| {
+        if (pl == player) break i;
+    } else unreachable;
+    const base_angle: f32 = -std.math.pi / 2.0 +
+        @as(f32, @floatFromInt(index)) * (2.0 * std.math.pi / @as(f32, @floatFromInt(players.len)));
+    var card_angle = base_angle + std.math.pi / 2.0;
+    if (@sin(base_angle) < 0.0) card_angle += std.math.pi;
+    return .{ .base_angle = base_angle, .card_angle = card_angle };
+}
+
+/// Position at `distance` from the table center towards `seat`.
+fn frontOf(seat: Seat, distance: f32) [2]f32 {
+    return .{ distance * @cos(seat.base_angle), distance * @sin(seat.base_angle) };
+}
+
+/// Interpolates between two angles along the shorter way around.
+fn lerpAngle(a: f32, b: f32, amount: f32) f32 {
+    const diff = @mod(b - a + std.math.pi, 2.0 * std.math.pi) - std.math.pi;
+    return a + diff * amount;
+}
+
+test "lerpAngle takes the shorter way around" {
+    try t.expectApproxEqAbs(@as(f32, 0.0), lerpAngle(0.0, 2.0 * std.math.pi, 0.5), 1e-5);
+    try t.expectApproxEqAbs(@as(f32, -0.25), lerpAngle(0.0, -0.5, 0.5), 1e-5);
+    // From just above 0 to just below 2π: backwards through 0, not forwards around.
+    try t.expectApproxEqAbs(@as(f32, 0.0), lerpAngle(0.1, 2.0 * std.math.pi - 0.1, 0.5), 1e-5);
+}
 
 const TextParameters = struct {
     x: f32 = 0.0,

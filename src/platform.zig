@@ -28,6 +28,7 @@ pub const Key = enum(u8) {
     Down = 40,
     A = 65,
     D = 68,
+    L = 76,
     S = 83,
     W = 87,
 };
@@ -140,6 +141,12 @@ const wasm = if (is_wasm) struct {
     extern fn logInfo(ptr: [*]const u8, len: usize) void;
     extern fn logWarn(ptr: [*]const u8, len: usize) void;
     extern fn logErr(ptr: [*]const u8, len: usize) void;
+
+    /// localStorage-backed storage, see `writeStorage`/`readStorage`.
+    extern fn storageWrite(name_ptr: [*]const u8, name_len: usize, data_ptr: [*]const u8, data_len: usize) void;
+    /// Byte length of the stored value, or -1 if there is none.
+    extern fn storageLength(name_ptr: [*]const u8, name_len: usize) i32;
+    extern fn storageRead(name_ptr: [*]const u8, name_len: usize, buf_ptr: [*]u8, buf_len: usize) void;
 } else struct {};
 
 // ---------------------------------------------------------------------------
@@ -524,6 +531,29 @@ pub fn logWarn(comptime fmt: []const u8, args: anytype) void {
     }
 }
 
+/// Persists `data` under `name`: a file in the working directory on native,
+/// a `localStorage` entry on wasm.
+pub fn writeStorage(io: std.Io, name: []const u8, data: []const u8) !void {
+    if (is_wasm) {
+        wasm.storageWrite(name.ptr, name.len, data.ptr, data.len);
+    } else {
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = name, .data = data });
+    }
+}
+
+/// Reads what `writeStorage` stored under `name`. The caller owns the result.
+pub fn readStorage(io: std.Io, allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+    if (is_wasm) {
+        const len = wasm.storageLength(name.ptr, name.len);
+        if (len < 0) return error.FileNotFound;
+        const buf = try allocator.alloc(u8, @intCast(len));
+        wasm.storageRead(name.ptr, name.len, buf.ptr, buf.len);
+        return buf;
+    } else {
+        return std.Io.Dir.cwd().readFileAlloc(io, name, allocator, .unlimited);
+    }
+}
+
 pub fn logErr(comptime fmt: []const u8, args: anytype) void {
     if (is_wasm) {
         var buf: [512]u8 = undefined;
@@ -542,9 +572,94 @@ pub fn close() void {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Startup options
+// ---------------------------------------------------------------------------
+
+/// Startup options. Native parses them from the command line; the defaults
+/// are what the browser build runs with.
+pub const Options = struct {
+    /// Scenario file to load at startup; also used by S and L.
+    scenario: ?[]const u8 = null,
+    /// Steps to run on their own after startup.
+    steps: u32 = 0,
+};
+
+const usage_text =
+    \\Usage: risk_stack [options]
+    \\
+    \\  --scenario <file>  Load <file> at startup. S saves to and L loads
+    \\                     from it (default: scenario.json). In "deck", the
+    \\                     last card is drawn next; "seed" seeds the game.
+    \\  --steps <n>        Run n steps on their own, as if Space was pressed,
+    \\                     and close once the last one has been shown (or
+    \\                     the game has ended).
+    \\  --help             Show this help.
+;
+
+const ParsedArgs = union(enum) {
+    run: Options,
+    help,
+};
+
+fn parseOptions(args: []const [:0]const u8) !ParsedArgs {
+    var options = Options{};
+    var i: usize = 1; // args[0] is the program
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            return .help;
+        } else if (std.mem.eql(u8, arg, "--scenario")) {
+            i += 1;
+            if (i >= args.len) return error.MissingScenarioPath;
+            options.scenario = args[i];
+        } else if (std.mem.eql(u8, arg, "--steps")) {
+            i += 1;
+            if (i >= args.len) return error.MissingStepCount;
+            options.steps = std.fmt.parseInt(u32, args[i], 10) catch return error.InvalidStepCount;
+        } else {
+            logErr("unknown argument '{s}'", .{arg});
+            return error.UnknownArgument;
+        }
+    }
+    return .{ .run = options };
+}
+
+test "parseOptions" {
+    const parsed = (try parseOptions(&.{ "risk_stack", "--scenario", "freeze.json", "--steps", "3" })).run;
+    try t.expectEqualStrings("freeze.json", parsed.scenario.?);
+    try t.expectEqual(@as(u32, 3), parsed.steps);
+
+    const defaults = (try parseOptions(&.{"risk_stack"})).run;
+    try t.expectEqual(@as(?[]const u8, null), defaults.scenario);
+    try t.expectEqual(@as(u32, 0), defaults.steps);
+
+    try t.expect(try parseOptions(&.{ "risk_stack", "--steps", "3", "--help" }) == .help);
+
+    try t.expectError(error.MissingStepCount, parseOptions(&.{ "risk_stack", "--steps" }));
+    try t.expectError(error.InvalidStepCount, parseOptions(&.{ "risk_stack", "--steps", "-1" }));
+    try t.expectError(error.MissingScenarioPath, parseOptions(&.{ "risk_stack", "--scenario" }));
+}
+
+/// Parses the command line, handling `--help` and invalid arguments by
+/// exiting. Native only; call it before the platform opens a window.
+pub fn parseArgs(args: []const [:0]const u8) Options {
+    const parsed = parseOptions(args) catch |err| {
+        logErr("invalid arguments: {}\n\n{s}", .{ err, usage_text });
+        std.process.exit(2);
+    };
+    switch (parsed) {
+        .run => |options| return options,
+        .help => {
+            logInfo("{s}", .{usage_text});
+            std.process.exit(0);
+        },
+    }
+}
+
 fn validateApp(comptime App: type) void {
     const required = .{
-        .{ "onInit", fn (std.mem.Allocator, std.Io) void },
+        .{ "onInit", fn (std.mem.Allocator, std.Io, Options) void },
         .{ "onDeinit", fn () void },
         .{ "onResize", fn (c_uint, c_uint, f32) void },
         .{ "onKeyDown", fn (Key) void },
@@ -591,13 +706,15 @@ test "jsKey and jsMouseButton drop unmapped codes" {
     try t.expectEqual(@as(?MouseButton, null), jsMouseButton(3)); // "back" button
 }
 
-pub fn run(comptime App: type, gpa: std.mem.Allocator, io: std.Io) void {
+/// `options` are handed to `App.onInit`: parsed with `parseArgs` on native,
+/// the defaults on wasm.
+pub fn run(comptime App: type, gpa: std.mem.Allocator, io: std.Io, options: Options) void {
     validateApp(App);
 
     if (is_wasm) {
         const Exports = struct {
             export fn onInit() void {
-                App.onInit(std.heap.wasm_allocator, wasm_io);
+                App.onInit(std.heap.wasm_allocator, wasm_io, .{});
             }
             export fn onResize(w: c_uint, h: c_uint, s: f32) void {
                 App.onResize(w, h, s);
@@ -630,6 +747,6 @@ pub fn run(comptime App: type, gpa: std.mem.Allocator, io: std.Io) void {
         };
         _ = Exports;
     } else {
-        sdl.run(App, gpa, io);
+        sdl.run(App, gpa, io, options);
     }
 }

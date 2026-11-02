@@ -29,6 +29,7 @@ const scancode_map = [_]ScanEntry{
     .{ .sdl = 41, .js = p.Key.Escape },
     .{ .sdl = 4, .js = p.Key.A },
     .{ .sdl = 7, .js = p.Key.D },
+    .{ .sdl = 15, .js = p.Key.L },
     .{ .sdl = 22, .js = p.Key.S },
     .{ .sdl = 26, .js = p.Key.W },
 };
@@ -65,7 +66,7 @@ pub fn close() void {
 
 var global_running: bool = false;
 
-pub fn run(comptime App: type, gpa: std.mem.Allocator, io: std.Io) void {
+pub fn run(comptime App: type, gpa: std.mem.Allocator, io: std.Io, options: p.Options) void {
     if (builtin.target.os.tag == .linux) {
         // Prefer X11/XWayland over native Wayland: without server-side decorations
         // (e.g. on GNOME) SDL falls back to libdecor, whose software-rendered
@@ -115,7 +116,7 @@ pub fn run(comptime App: type, gpa: std.mem.Allocator, io: std.Io) void {
     p.loadProcs();
     logGlInfo();
 
-    App.onInit(gpa, io);
+    App.onInit(gpa, io, options);
     defer App.onDeinit();
 
     {

@@ -60,7 +60,8 @@ pub const Deck = struct {
     }
 
     pub fn shuffle(self: *Deck) void {
-        std.Random.shuffle(self.prng, Card, self.cards.items);
+        // u32 indices: `shuffle` uses usize, which draws differently on wasm32.
+        std.Random.shuffleWithIndex(self.prng, Card, self.cards.items, u32);
     }
 
     pub fn refill(self: *Deck, allocator: std.mem.Allocator) !void {
@@ -665,6 +666,7 @@ pub const Settings = struct {
 
 pub const GameSimulation = struct {
     allocator: std.mem.Allocator,
+    rng: *std.Random.DefaultPrng,
     prng: std.Random,
     settings: Settings,
 
@@ -678,13 +680,15 @@ pub const GameSimulation = struct {
 
     result_: ?GameResult = null,
 
-    pub fn init(allocator: std.mem.Allocator, prng: std.Random, players_init: []const DrawStrategy) !GameSimulation {
+    pub fn init(allocator: std.mem.Allocator, rng: *std.Random.DefaultPrng, players_init: []const DrawStrategy) !GameSimulation {
+        const prng = rng.random();
         const players = try allocator.alloc(Player, players_init.len);
         for (players, 0..) |*player, i| {
             player.* = try Player.init(allocator, prng, players_init[i]);
         }
         return GameSimulation{
             .allocator = allocator,
+            .rng = rng,
             .prng = prng,
             .settings = .{},
             .deck = try Deck.init(allocator, prng),
@@ -831,7 +835,7 @@ pub const GameSimulation = struct {
             return;
         }
 
-        const random_index = self.prng.intRangeLessThan(usize, 0, available_players.items.len);
+        const random_index = self.prng.intRangeLessThan(u32, 0, @intCast(available_players.items.len));
         _ = available_players.items[random_index].takeCard(.SecondChance);
         try self.addEvent(.{ .DrawCard = .{ .player = player, .card = .SecondChance } });
     }
@@ -881,7 +885,7 @@ pub const GameSimulation = struct {
             return;
         }
 
-        const random_index = self.prng.intRangeLessThan(usize, 0, available_players.items.len);
+        const random_index = self.prng.intRangeLessThan(u32, 0, @intCast(available_players.items.len));
         var freeze_target = available_players.items[random_index];
         std.debug.assert(freeze_target != player);
         freeze_target.freeze();
@@ -927,6 +931,7 @@ pub const GameSimulation = struct {
 
             const drawn = self.deck.cards.pop().?;
             self.cards_played += 1;
+            try self.addEvent(.{ .DrawCard = .{ .player = player, .card = drawn } });
             if (drawn == .Freeze) {
                 freeze_count += 1;
                 continue;
@@ -982,7 +987,7 @@ pub const GameSimulation = struct {
             return;
         }
 
-        const random_index = self.prng.intRangeLessThan(usize, 0, available_players.items.len);
+        const random_index = self.prng.intRangeLessThan(u32, 0, @intCast(available_players.items.len));
         const flip_three_target = available_players.items[random_index];
         std.debug.assert(flip_three_target != player);
         try self.drawThreeCards(player, flip_three_target);
@@ -1095,37 +1100,67 @@ pub const GameSimulation = struct {
     }
 
     const SavedPlayer = struct {
-        hand: []Card,
+        hand: []const Card,
         score: u32,
+        state: PlayerState,
+        strategy: DrawStrategy,
     };
     const Saved = struct {
-        deck: []Card,
-        discarded: []Card,
-        players: []SavedPlayer,
-
-        pub fn deinit(self_: *const @This(), allocator_: std.mem.Allocator) void {
-            allocator_.free(self_.deck);
-            allocator_.free(self_.discarded);
-            for (self_.players) |player| {
-                allocator_.free(player.hand);
-            }
-            allocator_.free(self_.players);
-        }
+        deck: []const Card,
+        discarded: []const Card = &.{},
+        players: []const SavedPlayer,
+        current_player_index: u32 = 0,
+        cards_played: u32 = 0,
+        /// Exact generator state from `save`, see `encodePrngState`. Takes precedence over `seed`.
+        prng_state: ?[]const u8 = null,
+        /// Seeds the generator, for hand-written scenarios. Note that JavaScript rounds integers above 2^53.
+        seed: ?u64 = null,
     };
 
-    pub fn save(self: *GameSimulation, allocator: std.mem.Allocator) ![]const u8 {
-        const saved = Saved{
-            .deck = try allocator.dupe(Card, self.deck.cards.items),
-            .discarded = try allocator.dupe(Card, self.deck.discarded.items),
-            .players = try allocator.alloc(SavedPlayer, self.players.len),
-        };
-        for (saved.players, 0..) |*player, i| {
-            const p = &self.players[i];
-            player.hand = try allocator.dupe(Card, p.hand.items);
-            player.score = p.score;
+    /// The four Xoshiro256 words as 64 hex digits. JSON numbers can't hold
+    /// them reliably: JavaScript rounds integers above 2^53.
+    fn encodePrngState(rng: *const std.Random.DefaultPrng) [64]u8 {
+        var out: [64]u8 = undefined;
+        for (rng.s, 0..) |word, i| {
+            _ = std.fmt.bufPrint(out[i * 16 ..][0..16], "{x:0>16}", .{word}) catch unreachable;
         }
-        defer saved.deinit(allocator);
-        return try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(saved, .{})});
+        return out;
+    }
+
+    fn decodePrngState(text: []const u8) ![4]u64 {
+        if (text.len != 64) return error.InvalidPrngState;
+        var words: [4]u64 = undefined;
+        for (&words, 0..) |*word, i| {
+            word.* = std.fmt.parseInt(u64, text[i * 16 ..][0..16], 16) catch return error.InvalidPrngState;
+        }
+        // An all-zero state makes Xoshiro256 return zeros forever.
+        if (std.mem.allEqual(u64, &words, 0)) return error.InvalidPrngState;
+        return words;
+    }
+
+    /// Serializes the simulation state, including the generator state, to
+    /// JSON. Loading it continues the game exactly as this one would.
+    pub fn save(self: *GameSimulation, allocator: std.mem.Allocator) ![]const u8 {
+        const players = try allocator.alloc(SavedPlayer, self.players.len);
+        defer allocator.free(players);
+        for (players, self.players) |*saved, *player| {
+            saved.* = .{
+                .hand = player.hand.items,
+                .score = player.score,
+                .state = player.state,
+                .strategy = player.strategy,
+            };
+        }
+        const prng_state = encodePrngState(self.rng);
+        const saved = Saved{
+            .deck = self.deck.cards.items,
+            .discarded = self.deck.discarded.items,
+            .players = players,
+            .current_player_index = self.current_player_index,
+            .cards_played = self.cards_played,
+            .prng_state = &prng_state,
+        };
+        return try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(saved, .{ .emit_null_optional_fields = false })});
     }
 
     test "save" {
@@ -1135,50 +1170,184 @@ pub const GameSimulation = struct {
         const s = try tf.simulation.save(tf.allocator);
         defer tf.allocator.free(s);
         try t.expectEqualStrings(
-            \\{"deck":["Eight","Eight","Eight","Three","Ten","Three","SecondChance","SecondChance","Eight","Five","One","Six","Six","Five","Six","Ten","Eleven","Seven","Nine","Ten","Nine","Zero","Seven","Six","Ten","Ten","Two","Twelve","PlusTwo","Eight","Four","Ten","Ten","FlipThree","FlipThree","Ten","Eleven","Six","Twelve","Two","Seven","Eleven","Eleven","Nine","Nine","Eight","Nine","Seven","Seven","Twelve","Twelve","Twelve","Four","Eleven","Eight","Ten","Freeze","Ten","Twelve","Three","Four","Seven","Eleven","Eleven","PlusEight","FlipThree","Nine","Twelve","Eight","Five","PlusFour","Twelve","Five","Eleven","Twelve","Freeze","Four","Twelve","Seven","Eleven","SecondChance","Five","Eleven","Eleven","Six","TimesTwo","PlusSix","PlusTen","Freeze","Twelve","Twelve","Nine","Nine","Nine"],"discarded":[],"players":[{"hand":[],"score":0},{"hand":[],"score":0}]}
+            \\{"deck":["Seven","Twelve","FlipThree","Seven","Eleven","Eight","Nine","Eight","Six","One","Five","FlipThree","Eight","Six","Twelve","Freeze","SecondChance","Eight","PlusTwo","Three","Nine","Six","Seven","Nine","Six","Ten","Eleven","Ten","SecondChance","Freeze","Twelve","Three","Eight","Ten","Zero","Twelve","Twelve","Nine","Eleven","Twelve","Twelve","Eleven","Nine","Nine","Four","FlipThree","Three","Eleven","Five","Freeze","Ten","Twelve","Eleven","Eleven","Ten","PlusFour","Two","Two","SecondChance","Four","Nine","Four","PlusEight","Ten","Ten","Five","Eight","Five","Seven","Twelve","Nine","Eleven","PlusTen","Five","Twelve","Six","Eleven","Eight","TimesTwo","Six","Twelve","Eight","Nine","Twelve","Seven","Four","Ten","Eleven","Eleven","Ten","Seven","PlusSix","Seven","Ten"],"discarded":[],"players":[{"hand":[],"score":0,"state":"InGame","strategy":{"Random":{}}},{"hand":[],"score":0,"state":"InGame","strategy":{"Random":{}}}],"current_player_index":0,"cards_played":0,"prng_state":"cb266253fc824a6f7b5c030fb46a88ff6f9d8afede5704d0b5c55d5a9cb43353"}
         , s);
     }
 
-    pub fn load(self: *GameSimulation, allocator: std.mem.Allocator, input: []const u8) !void {
-        const saved = try std.json.parseFromSlice(Saved, allocator, input, .{});
-        defer saved.deinit();
+    /// Replaces the simulation state with a state produced by `save`. On
+    /// error the simulation is left unchanged. Pending events are dropped.
+    pub fn load(self: *GameSimulation, input: []const u8) !void {
+        const parsed = try std.json.parseFromSlice(Saved, self.allocator, input, .{});
+        defer parsed.deinit();
+        const saved = parsed.value;
+        if (saved.players.len == 0) return error.NoPlayers;
+        if (saved.current_player_index >= saved.players.len) return error.InvalidCurrentPlayerIndex;
+        const prng_state: ?[4]u64 = if (saved.prng_state) |text| try decodePrngState(text) else null;
+
+        // Build everything that can fail before touching `self`.
+        const players = try self.allocator.alloc(Player, saved.players.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (players[0..initialized]) |*player| player.deinit(self.allocator);
+            self.allocator.free(players);
+        }
+        for (players, saved.players) |*player, saved_player| {
+            player.* = try Player.init(self.allocator, self.prng, saved_player.strategy);
+            initialized += 1;
+            try player.hand.appendSlice(self.allocator, saved_player.hand);
+            player.score = saved_player.score;
+            player.state = saved_player.state;
+        }
+        const player_selection_buffer = try self.allocator.alloc(*Player, players.len);
+        errdefer self.allocator.free(player_selection_buffer);
+        try self.deck.cards.ensureTotalCapacity(self.allocator, saved.deck.len);
+        try self.deck.discarded.ensureTotalCapacity(self.allocator, saved.discarded.len);
+
+        // Nothing below can fail.
+        for (self.players) |*player| player.deinit(self.allocator);
+        self.allocator.free(self.players);
+        self.allocator.free(self.player_selection_buffer);
+        self.players = players;
+        self.player_selection_buffer = player_selection_buffer;
 
         self.deck.cards.clearRetainingCapacity();
-        try self.deck.cards.appendSlice(allocator, saved.value.deck);
+        self.deck.cards.appendSliceAssumeCapacity(saved.deck);
+        self.deck.discarded.clearRetainingCapacity();
+        self.deck.discarded.appendSliceAssumeCapacity(saved.discarded);
 
-        for (self.players) |*player| player.deinit(self.allocator);
-        allocator.free(self.players);
-        self.players = try allocator.alloc(Player, saved.value.players.len);
-        for (self.players, 0..) |*player, i| {
-            player.hand = try std.ArrayList(Card).initCapacity(allocator, saved.value.players[i].hand.len);
-            try player.hand.appendSlice(allocator, saved.value.players[i].hand);
-            player.score = saved.value.players[i].score;
+        self.current_player_index = saved.current_player_index;
+        self.cards_played = saved.cards_played;
+        self.result_ = null;
+        self.events.clearRetainingCapacity();
+
+        // Deck and players hold interfaces to `rng`, so update it in place.
+        if (prng_state) |state| {
+            self.rng.s = state;
+        } else if (saved.seed) |seed| {
+            self.rng.* = .init(seed);
         }
     }
 
-    test "load" {
+    test "save and load round-trip" {
+        var original = try TestFixture.init(t.allocator, 3, &[_]Card{ .Freeze, .Seven });
+        defer original.deinit();
+        original.simulation.players[1].score = 42;
+        original.simulation.players[1].state = .Frozen;
+        try original.simulation.players[2].hand.append(t.allocator, .PlusFour);
+        original.simulation.players[0].strategy = .{ .MinPoints = 25 };
+        original.simulation.current_player_index = 2;
+        original.simulation.cards_played = 7;
+
+        const saved = try original.simulation.save(t.allocator);
+        defer t.allocator.free(saved);
+
+        // Different player count: load has to replace the players.
+        var loaded = try TestFixture.init(t.allocator, 2, &[_]Card{});
+        defer loaded.deinit();
+        try loaded.simulation.load(saved);
+
+        const a = &original.simulation;
+        const b = &loaded.simulation;
+        try t.expectEqualSlices(Card, a.deck.cards.items, b.deck.cards.items);
+        try t.expectEqual(@as(usize, 3), b.players.len);
+        try t.expectEqual(@as(usize, 3), b.player_selection_buffer.len);
+        for (a.players, b.players) |pa, pb| {
+            try t.expectEqualSlices(Card, pa.hand.items, pb.hand.items);
+            try t.expectEqual(pa.score, pb.score);
+            try t.expectEqual(pa.state, pb.state);
+            try t.expectEqual(pa.strategy, pb.strategy);
+        }
+        try t.expectEqual(@as(u32, 2), b.current_player_index);
+        try t.expectEqual(@as(u32, 7), b.cards_played);
+    }
+
+    test "a loaded game continues exactly like the saved one" {
+        var original = try TestFixture.init(t.allocator, 3, &[_]Card{});
+        defer original.deinit();
+        for (0..10) |_| _ = try original.simulation.step();
+
+        const saved = try original.simulation.save(t.allocator);
+        defer t.allocator.free(saved);
+
+        var copy = try TestFixture.init(t.allocator, 2, &[_]Card{});
+        defer copy.deinit();
+        copy.r = .init(12345); // must not matter, the state comes from the file
+        try copy.simulation.load(saved);
+
+        for (0..40) |_| {
+            const a = try original.simulation.step();
+            const b = try copy.simulation.step();
+            try t.expectEqual(a, b);
+        }
+        const end_a = try original.simulation.save(t.allocator);
+        defer t.allocator.free(end_a);
+        const end_b = try copy.simulation.save(t.allocator);
+        defer t.allocator.free(end_b);
+        try t.expectEqualStrings(end_a, end_b);
+    }
+
+    test "load seeds the generator from seed" {
         var tf = try TestFixture.init(t.allocator, 2, &[_]Card{});
         defer tf.deinit();
-
-        try tf.simulation.load(tf.allocator,
-            \\{"deck":["Eight","Eight","Eight","Three","Ten","Three","SecondChance","SecondChance","Eight","Five","One","Six","Six","Five","Six","Ten","Eleven","Seven","Nine","Ten","Nine","Zero","Seven","Six","Ten","Ten","Two","Twelve","PlusTwo","Eight","Four","Ten","Ten","FlipThree","FlipThree","Ten","Eleven","Six","Twelve","Two","Seven","Eleven","Eleven","Nine","Nine","Eight","Nine","Seven","Seven","Twelve","Twelve","Twelve","Four","Eleven","Eight","Ten","Freeze","Ten","Twelve","Three","Four","Seven","Eleven","Eleven","PlusEight","FlipThree","Nine","Twelve","Eight","Five","PlusFour","Twelve","Five","Eleven","Twelve","Freeze","Four","Twelve","Seven","Eleven","SecondChance","Five","Eleven","Eleven","Six","TimesTwo","PlusSix","PlusTen","Freeze","Twelve","Twelve","Nine","Nine","Nine"],"discarded":[],"players":[{"hand":[],"score":0},{"hand":[],"score":0}]}
+        try tf.simulation.load(
+            \\{"deck":[],"players":[{"hand":[],"score":0,"state":"InGame","strategy":{"Random":{}}}],"seed":42}
         );
+        try t.expectEqual(std.Random.DefaultPrng.init(42).s, tf.r.s);
+    }
 
-        const expected_cards = [_]Card{ .Eight, .Eight, .Eight, .Three, .Ten, .Three, .SecondChance, .SecondChance, .Eight, .Five, .One, .Six, .Six, .Five, .Six, .Ten, .Eleven, .Seven, .Nine, .Ten, .Nine, .Zero, .Seven, .Six, .Ten, .Ten, .Two, .Twelve, .PlusTwo, .Eight, .Four, .Ten, .Ten, .FlipThree, .FlipThree, .Ten, .Eleven, .Six, .Twelve, .Two, .Seven, .Eleven, .Eleven, .Nine, .Nine, .Eight, .Nine, .Seven, .Seven, .Twelve, .Twelve, .Twelve, .Four, .Eleven, .Eight, .Ten, .Freeze, .Ten, .Twelve, .Three, .Four, .Seven, .Eleven, .Eleven, .PlusEight, .FlipThree, .Nine, .Twelve, .Eight, .Five, .PlusFour, .Twelve, .Five, .Eleven, .Twelve, .Freeze, .Four, .Twelve, .Seven, .Eleven, .SecondChance, .Five, .Eleven, .Eleven, .Six, .TimesTwo, .PlusSix, .PlusTen, .Freeze, .Twelve, .Twelve, .Nine, .Nine, .Nine };
+    test "load rejects a malformed prng_state" {
+        var tf = try TestFixture.init(t.allocator, 2, &[_]Card{});
+        defer tf.deinit();
+        const before = tf.r.s;
+        try t.expectError(error.InvalidPrngState, tf.simulation.load(
+            \\{"deck":[],"players":[{"hand":[],"score":0,"state":"InGame","strategy":{"Random":{}}}],"prng_state":"1234"}
+        ));
+        try t.expectError(error.InvalidPrngState, tf.simulation.load(
+            \\{"deck":[],"players":[{"hand":[],"score":0,"state":"InGame","strategy":{"Random":{}}}],"prng_state":"0000000000000000000000000000000000000000000000000000000000000000"}
+        ));
+        try t.expectEqual(before, tf.r.s);
+        try t.expectEqual(@as(usize, 2), tf.simulation.players.len);
+    }
 
-        for (expected_cards, 0..) |card, i| {
-            try t.expectEqual(card, tf.simulation.deck.cards.items[i]);
-        }
-        try t.expectEqual(0, tf.simulation.deck.discarded.items.len);
-        try t.expectEqual(2, tf.simulation.players.len);
+    test "seeded games play out identically on every target" {
+        // Golden value: the same on 64-bit desktop and wasm32. If this changes,
+        // either the rules changed or a draw depends on the target again
+        // (e.g. a usize in a random call).
+        var tf = try TestFixture.init(t.allocator, 4, &[_]Card{});
+        defer tf.deinit();
+        for (0..40) |_| _ = try tf.simulation.step();
+        const saved = try tf.simulation.save(t.allocator);
+        defer t.allocator.free(saved);
+        try t.expectEqual(@as(u64, 14917618236895209355), std.hash.Wyhash.hash(0, saved));
+    }
 
-        const player_one = tf.simulation.players[0];
-        try t.expectEqual(0, player_one.hand.items.len);
-        try t.expectEqual(0, player_one.score);
+    test "load requires state and strategy for every player" {
+        var tf = try TestFixture.init(t.allocator, 2, &[_]Card{});
+        defer tf.deinit();
+        try t.expectError(error.MissingField, tf.simulation.load(
+            \\{"deck":[],"players":[{"hand":[],"score":0,"strategy":{"Random":{}}}]}
+        ));
+        try t.expectError(error.MissingField, tf.simulation.load(
+            \\{"deck":[],"players":[{"hand":[],"score":0,"state":"InGame"}]}
+        ));
+        try t.expectEqual(@as(usize, 2), tf.simulation.players.len);
+    }
 
-        const player_two = tf.simulation.players[1];
-        try t.expectEqual(0, player_two.hand.items.len);
-        try t.expectEqual(0, player_two.score);
+    test "load rejects invalid input and keeps the state" {
+        var tf = try TestFixture.init(t.allocator, 2, &[_]Card{.Seven});
+        defer tf.deinit();
+        const deck_len = tf.simulation.deck.cards.items.len;
+
+        try t.expectError(error.NoPlayers, tf.simulation.load(
+            \\{"deck":[],"players":[]}
+        ));
+        try t.expectError(error.InvalidCurrentPlayerIndex, tf.simulation.load(
+            \\{"deck":[],"players":[{"hand":[],"score":0,"state":"InGame","strategy":{"Random":{}}}],"current_player_index":1}
+        ));
+        try t.expect(std.meta.isError(tf.simulation.load("not json")));
+
+        try t.expectEqual(deck_len, tf.simulation.deck.cards.items.len);
+        try t.expectEqual(@as(usize, 2), tf.simulation.players.len);
     }
 
     fn addEvent(self: *GameSimulation, event: GameEvent) !void {
@@ -1213,7 +1382,6 @@ const TestFixture = struct {
         result_.allocator = allocator;
 
         result_.r = std.Random.DefaultPrng.init(0);
-        const prng = result_.r.random();
 
         const draw_strategies = try allocator.alloc(DrawStrategy, num_players);
         defer allocator.free(draw_strategies);
@@ -1221,7 +1389,7 @@ const TestFixture = struct {
             strat.* = .Random;
         }
 
-        result_.simulation = try GameSimulation.init(allocator, prng, draw_strategies);
+        result_.simulation = try GameSimulation.init(allocator, &result_.r, draw_strategies);
 
         for (top_cards) |card| {
             try result_.simulation.deck.cards.append(allocator, card);

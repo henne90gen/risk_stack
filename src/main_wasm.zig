@@ -3,7 +3,7 @@ const m = @import("main.zig");
 
 comptime {
     if (@import("builtin").target.cpu.arch == .wasm32) {
-        m.p.run(m.RiskStackApp, std.heap.wasm_allocator, wasm_io);
+        m.p.run(m.RiskStackApp, std.heap.wasm_allocator, wasm_io, .{});
     }
 }
 

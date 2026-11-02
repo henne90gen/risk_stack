@@ -51,7 +51,7 @@ pub fn main(init: std.process.Init) !void {
                 _ = arena.reset(.retain_capacity);
 
                 const start_time = std.Io.Clock.now(.real, ctx.io);
-                const result = try runGame(arena_allocator, ctx.prng.random());
+                const result = try runGame(arena_allocator, &ctx.prng);
                 const end_time = std.Io.Clock.now(.real, ctx.io);
                 local_cards_played += result.cards_played;
                 local_runtime = .fromNanoseconds(local_runtime.nanoseconds + start_time.durationTo(end_time).nanoseconds);
@@ -71,8 +71,8 @@ pub fn main(init: std.process.Init) !void {
             }
         }
 
-        fn runGame(game_allocator: std.mem.Allocator, prng: std.Random) !f7.GameResult {
-            var deck = try f7.Deck.init(game_allocator, prng);
+        fn runGame(game_allocator: std.mem.Allocator, rng: *std.Random.DefaultPrng) !f7.GameResult {
+            var deck = try f7.Deck.init(game_allocator, rng.random());
             defer deck.deinit(game_allocator);
 
             const strategies = [_]f7.DrawStrategy{
@@ -101,7 +101,7 @@ pub fn main(init: std.process.Init) !void {
                 .{ .ChanceOfFailureBelow = 0.4 },
             };
 
-            var simulation = try f7.GameSimulation.init(game_allocator, prng, &strategies);
+            var simulation = try f7.GameSimulation.init(game_allocator, rng, &strategies);
             defer simulation.deinit();
 
             while (try simulation.step()) {}
