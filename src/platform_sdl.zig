@@ -65,7 +65,7 @@ pub fn close() void {
 
 var global_running: bool = false;
 
-pub fn run(comptime App: type) void {
+pub fn run(comptime App: type, io: std.Io) void {
     if (builtin.target.os.tag == .linux) {
         // Prefer X11/XWayland over native Wayland: without server-side decorations
         // (e.g. on GNOME) SDL falls back to libdecor, whose software-rendered
@@ -115,8 +115,7 @@ pub fn run(comptime App: type) void {
     p.loadProcs();
     logGlInfo();
 
-    // TODO get time and pass as seed
-    App.onInit(0);
+    App.onInit(io);
 
     {
         var lw: c_int = 0;

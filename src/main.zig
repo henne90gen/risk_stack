@@ -164,6 +164,7 @@ const FlipThreeStackEntry = struct {
 
 const AppState = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     aspect_ratio: f32 = 1.0,
     gl: OpenGLState = .{},
     zoom: ZoomState = .{},
@@ -177,11 +178,15 @@ const AppState = struct {
     should_run_next_step: bool = false,
     next_event_to_process_index: usize = 0,
 
-    pub fn init(allocator: std.mem.Allocator, seed: u64) !AppState {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) !AppState {
+        var buf = [_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 };
+        io.random(&buf);
+        const seed: u64 = @bitCast(buf);
         var r = std.Random.DefaultPrng.init(seed);
         const prng = r.random();
         return AppState{
             .allocator = allocator,
+            .io = io,
             .animation = try AnimationState.init(allocator),
             .prng = prng,
             .flip_three_stack = try std.ArrayList(FlipThreeStackEntry).initCapacity(allocator, 3),
@@ -196,8 +201,8 @@ const AppState = struct {
 var app_state: AppState = undefined;
 
 pub const RiskStackApp = struct {
-    pub fn onInit(seed: c_ulong) void {
-        app_state = AppState.init(std.heap.page_allocator, seed) catch @panic("failed to initialize app state");
+    pub fn onInit(io: std.Io) void {
+        app_state = AppState.init(std.heap.page_allocator, io) catch @panic("failed to initialize app state");
         app_state.simulation = f.GameSimulation.init(app_state.allocator, app_state.prng, &[_]f.DrawStrategy{
             f.DrawStrategy{ .MinPoints = 20 },
             f.DrawStrategy{ .MinPoints = 30 },
@@ -287,7 +292,7 @@ pub const RiskStackApp = struct {
 
         p.glBindVertexArray(0);
 
-        app_state.cards = renderCardTextures(app_state.allocator, &atlas_cards, 8, 1920, 1080) catch |err| std.debug.panic("failed to load card textures: {}", .{err});
+        app_state.cards = renderCardTextures(app_state.io, app_state.allocator, &atlas_cards, 8, 1920, 1080) catch |err| std.debug.panic("failed to load card textures: {}", .{err});
         p.glGenTextures(1, @as([*]u32, @ptrCast(&app_state.gl.card_atlas_texture)));
         p.glActiveTexture(p.GL_TEXTURE0);
         p.glBindTexture(p.GL_TEXTURE_2D, app_state.gl.card_atlas_texture);
@@ -871,7 +876,9 @@ const CardTextures = struct {
     card_atlas: [atlas_cards.len]CardAtlasEntry = [_]CardAtlasEntry{.{}} ** atlas_cards.len,
 };
 
-fn renderCardTextures(allocator: std.mem.Allocator, faces: []const card_art.Card, cards_per_row: usize, max_width: usize, max_height: usize) !CardTextures {
+fn renderCardTextures(io: std.Io, allocator: std.mem.Allocator, faces: []const card_art.Card, cards_per_row: usize, max_width: usize, max_height: usize) !CardTextures {
+    const start_time = std.Io.Clock.real.now(io);
+
     const atlas = try card_art.renderAtlas(allocator, faces, cards_per_row, max_width, max_height);
     var result = CardTextures{
         .buffer_width = atlas.width,
@@ -894,7 +901,14 @@ fn renderCardTextures(allocator: std.mem.Allocator, faces: []const card_art.Card
         card.bottom_right_v = end_row_f / buffer_height_f;
     }
 
-    p.logInfo("rendered all cards into a single texture: {}x{}", .{ result.buffer_width, result.buffer_height });
+    const elapsed = start_time.durationTo(std.Io.Clock.real.now(io));
+    const elapsed_ms: f64 = @floatFromInt(elapsed.toMilliseconds());
+    const elapsed_s = elapsed_ms / std.time.ms_per_s;
+    p.logInfo("rendered all cards into a single texture: {}x{} in {}s", .{
+        result.buffer_width,
+        result.buffer_height,
+        elapsed_s,
+    });
 
     return result;
 }

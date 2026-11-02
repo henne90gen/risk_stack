@@ -3,9 +3,53 @@ const m = @import("main.zig");
 
 comptime {
     if (@import("builtin").target.cpu.arch == .wasm32) {
-        m.p.run(m.RiskStackApp);
+        m.p.run(m.RiskStackApp, wasm_io);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Io implementation backed by browser APIs.
+// Everything not overridden here behaves like `std.Io.failing`.
+// ---------------------------------------------------------------------------
+
+/// `Date.now()`: milliseconds since the Unix epoch.
+extern fn dateNow() f64;
+/// `performance.now()`: monotonic milliseconds since page load.
+extern fn performanceNow() f64;
+/// Fills `ptr[0..len]` via `crypto.getRandomValues()`.
+extern fn getRandomValues(ptr: [*]u8, len: usize) void;
+
+fn ioNow(_: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+    const ms = switch (clock) {
+        .real => dateNow(),
+        .awake, .boot, .cpu_process, .cpu_thread => performanceNow(),
+    };
+    return .fromNanoseconds(@intFromFloat(ms * std.time.ns_per_ms));
+}
+
+fn ioRandom(_: ?*anyopaque, buffer: []u8) void {
+    // getRandomValues() accepts at most 65536 bytes per call.
+    var rest = buffer;
+    while (rest.len > 0) {
+        const n = @min(rest.len, 65536);
+        getRandomValues(rest.ptr, n);
+        rest = rest[n..];
+    }
+}
+
+fn ioRandomSecure(userdata: ?*anyopaque, buffer: []u8) std.Io.RandomSecureError!void {
+    ioRandom(userdata, buffer);
+}
+
+const wasm_io_vtable: std.Io.VTable = blk: {
+    var vtable = std.Io.failing.vtable.*;
+    vtable.now = ioNow;
+    vtable.random = ioRandom;
+    vtable.randomSecure = ioRandomSecure;
+    break :blk vtable;
+};
+
+pub const wasm_io: std.Io = .{ .userdata = null, .vtable = &wasm_io_vtable };
 
 const ft = @cImport({
     @cInclude("ft2build.h");

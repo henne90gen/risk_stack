@@ -1,5 +1,3 @@
-let webgl2Supported = typeof WebGL2RenderingContext !== "undefined";
-let webgl_fallback = false;
 let gl;
 
 let webglOptions = {
@@ -14,36 +12,13 @@ let webglOptions = {
 };
 
 function initWebGL(canvas, getString) {
-  if (webgl2Supported) {
-    gl = canvas.getContext("webgl2", webglOptions);
-    if (!gl) {
-      throw new Error(
-        "The browser supports WebGL2, but initialization failed.",
-      );
-    }
+  // The renderer relies on WebGL 2 (instancing, vertexAttribIPointer, GLSL ES 3.00).
+  if (typeof WebGL2RenderingContext === "undefined") {
+    throw new Error("The browser does not support WebGL 2.");
   }
+  gl = canvas.getContext("webgl2", webglOptions);
   if (!gl) {
-    webgl_fallback = true;
-    gl = canvas.getContext("webgl", webglOptions);
-
-    if (!gl) {
-      throw new Error("The browser does not support WebGL");
-    }
-
-    let vaoExt = gl.getExtension("OES_vertex_array_object");
-    if (!vaoExt) {
-      throw new Error(
-        "The browser supports WebGL, but not the OES_vertex_array_object extension",
-      );
-    }
-    ((gl.createVertexArray = vaoExt.createVertexArrayOES),
-      (gl.deleteVertexArray = vaoExt.deleteVertexArrayOES),
-      (gl.isVertexArray = vaoExt.isVertexArrayOES),
-      (gl.bindVertexArray = vaoExt.bindVertexArrayOES),
-      (gl.createVertexArray = vaoExt.createVertexArrayOES));
-  }
-  if (!gl) {
-    throw new Error("The browser supports WebGL, but initialization failed.");
+    throw new Error("The browser supports WebGL 2, but initialization failed.");
   }
 
   // NOTE index 0 = unbound sentinel
@@ -97,22 +72,29 @@ function initWebGL(canvas, getString) {
   const glGetAttribLocation = (programId, namePtr, nameLen) =>
     gl.getAttribLocation(glPrograms[programId], getString(namePtr, nameLen));
   const glGetUniformLocation = (programId, namePtr, nameLen) => {
-    glUniformLocations.push(
-      gl.getUniformLocation(glPrograms[programId], getString(namePtr, nameLen)),
+    const location = gl.getUniformLocation(
+      glPrograms[programId],
+      getString(namePtr, nameLen),
     );
+    if (location === null) return -1;
+    glUniformLocations.push(location);
     return glUniformLocations.length - 1;
   };
+  const uniformLocation = (locationId) =>
+    locationId < 0 ? null : glUniformLocations[locationId];
   const glUniform1i = (locationId, x) =>
-    gl.uniform1i(glUniformLocations[locationId], x);
+    gl.uniform1i(uniformLocation(locationId), x);
   const glUniform1f = (locationId, x) =>
-    gl.uniform1f(glUniformLocations[locationId], x);
+    gl.uniform1f(uniformLocation(locationId), x);
   const glUniform2f = (locationId, x, y) =>
-    gl.uniform2f(glUniformLocations[locationId], x, y);
+    gl.uniform2f(uniformLocation(locationId), x, y);
+  const glUniform3f = (locationId, x, y, z) =>
+    gl.uniform3f(uniformLocation(locationId), x, y, z);
   const glUniform4f = (locationId, x, y, z, w) =>
-    gl.uniform4fv(glUniformLocations[locationId], [x, y, z, w]);
+    gl.uniform4f(uniformLocation(locationId), x, y, z, w);
   const glUniformMatrix4fv = (locationId, dataLen, transpose, dataPtr) => {
     const floats = new Float32Array(wasmMemory.buffer, dataPtr, dataLen * 16);
-    gl.uniformMatrix4fv(glUniformLocations[locationId], transpose, floats);
+    gl.uniformMatrix4fv(uniformLocation(locationId), transpose, floats);
   };
   const glCreateBuffer = () => {
     glBuffers.push(gl.createBuffer());
@@ -132,14 +114,7 @@ function initWebGL(canvas, getString) {
   const glAttachShader = (programId, shaderId) => {
     gl.attachShader(glPrograms[programId], glShaders[shaderId]);
   };
-  const glLinkProgram = (programId) => {
-    gl.linkProgram(glPrograms[programId]);
-    if (!gl.getProgramParameter(glPrograms[programId], gl.LINK_STATUS)) {
-      throw (
-        "Error linking program:" + gl.getProgramInfoLog(glPrograms[programId])
-      );
-    }
-  };
+  const glLinkProgram = (programId) => gl.linkProgram(glPrograms[programId]);
   const glCreateShader = (type) => {
     glShaders.push(gl.createShader(type));
     return glShaders.length - 1;
@@ -159,15 +134,12 @@ function initWebGL(canvas, getString) {
     glPrograms[id] = undefined;
   };
   const glDeleteBuffer = (id) => {
-    gl.deleteBuffer(glPrograms[id]);
-    glPrograms[id] = undefined;
+    gl.deleteBuffer(glBuffers[id]);
+    glBuffers[id] = undefined;
   };
   const glDeleteBuffers = (num, dataPtr) => {
     const buffers = new Uint32Array(wasmMemory.buffer, dataPtr, num);
-    for (let n = 0; n < num; n++) {
-      gl.deleteBuffer(buffers[n]);
-      glBuffers[buffers[n]] = undefined;
-    }
+    for (let n = 0; n < num; n++) glDeleteBuffer(buffers[n]);
   };
   const glDeleteShader = (id) => {
     gl.deleteShader(glShaders[id]);
@@ -229,16 +201,13 @@ function initWebGL(canvas, getString) {
       textures[n] = b;
     }
   };
+  const glDeleteTexture = (id) => {
+    gl.deleteTexture(glTextures[id]);
+    glTextures[id] = undefined;
+  };
   const glDeleteTextures = (num, dataPtr) => {
     const textures = new Uint32Array(wasmMemory.buffer, dataPtr, num);
-    for (let n = 0; n < num; n++) {
-      gl.glCreateTexture(glBuffers[n]);
-      glTextures[textures[n]] = undefined;
-    }
-  };
-  const glDeleteTexture = (id) => {
-    gl.deleteTexture(glShaders[id]);
-    glTextures[id] = undefined;
+    for (let n = 0; n < num; n++) glDeleteTexture(textures[n]);
   };
   const glBindTexture = (target, textureId) =>
     gl.bindTexture(target, glTextures[textureId]);
@@ -284,7 +253,7 @@ function initWebGL(canvas, getString) {
   const glDeleteVertexArrays = (num, dataPtr) => {
     const vaos = new Uint32Array(wasmMemory.buffer, dataPtr, num);
     for (let n = 0; n < num; n++) {
-      gl.glCreateTexture(vaos[n]);
+      gl.deleteVertexArray(glVertexArrays[vaos[n]]);
       glVertexArrays[vaos[n]] = undefined;
     }
   };
@@ -294,20 +263,25 @@ function initWebGL(canvas, getString) {
   const glGenerateMipmap = (target) => gl.generateMipmap(target);
   const glPixelStorei = (type, alignment) => gl.pixelStorei(type, alignment);
   const glGetError = () => gl.getError();
-  const glGetProgramInfoLog = (programId, logPtr, logLen) => {
-    const log = gl.getProgramInfoLog(glPrograms[programId]);
-    const encoder = new TextEncoder();
-    const encodedLog = encoder.encode(log);
-    const logArray = new Uint8Array(wasmMemory.buffer, logPtr, logLen);
-    logArray.set(encodedLog.slice(0, logLen));
+  const writeInfoLog = (log, logPtr, logLen, outLenPtr) => {
+    const encoded = new TextEncoder().encode(log ?? "").subarray(0, logLen);
+    new Uint8Array(wasmMemory.buffer, logPtr, logLen).set(encoded);
+    new DataView(wasmMemory.buffer).setUint32(outLenPtr, encoded.length, true);
   };
-  const glGetShaderInfoLog = (shaderId, logPtr, logLen) => {
-    const log = gl.getShaderInfoLog(glShaders[shaderId]);
-    const encoder = new TextEncoder();
-    const encodedLog = encoder.encode(log);
-    const logArray = new Uint8Array(wasmMemory.buffer, logPtr, logLen);
-    logArray.set(encodedLog.slice(0, logLen));
-  };
+  const glGetProgramInfoLog = (programId, logPtr, logLen, outLenPtr) =>
+    writeInfoLog(
+      gl.getProgramInfoLog(glPrograms[programId]),
+      logPtr,
+      logLen,
+      outLenPtr,
+    );
+  const glGetShaderInfoLog = (shaderId, logPtr, logLen, outLenPtr) =>
+    writeInfoLog(
+      gl.getShaderInfoLog(glShaders[shaderId]),
+      logPtr,
+      logLen,
+      outLenPtr,
+    );
   const glGetProgramiv = (programId, pname, paramsPtr) => {
     const params = new Int32Array(wasmMemory.buffer, paramsPtr, 1);
     params[0] = gl.getProgramParameter(glPrograms[programId], pname);
@@ -338,6 +312,7 @@ function initWebGL(canvas, getString) {
     glUniform1i,
     glUniform1f,
     glUniform2f,
+    glUniform3f,
     glUniform4f,
     glUniformMatrix4fv,
     glCreateBuffer,

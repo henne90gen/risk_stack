@@ -140,7 +140,6 @@ const wasm = if (is_wasm) struct {
     extern fn logInfo(ptr: [*]const u8, len: usize) void;
     extern fn logWarn(ptr: [*]const u8, len: usize) void;
     extern fn logErr(ptr: [*]const u8, len: usize) void;
-
 } else struct {};
 
 // ---------------------------------------------------------------------------
@@ -545,7 +544,7 @@ pub fn close() void {
 
 fn validateApp(comptime App: type) void {
     const required = .{
-        .{ "onInit", fn (c_ulong) void },
+        .{ "onInit", fn (std.Io) void },
         .{ "onResize", fn (c_uint, c_uint, f32) void },
         .{ "onKeyDown", fn (Key) void },
         .{ "onKeyUp", fn (Key) void },
@@ -570,28 +569,53 @@ fn validateApp(comptime App: type) void {
     }
 }
 
-pub fn run(comptime App: type) void {
+const wasm_io: std.Io = if (is_wasm and @hasDecl(@import("root"), "wasm_io"))
+    @import("root").wasm_io
+else
+    std.Io.failing;
+
+fn jsKey(key_code: u32) ?Key {
+    return std.enums.fromInt(Key, key_code);
+}
+
+fn jsMouseButton(button: u32) ?MouseButton {
+    return std.enums.fromInt(MouseButton, button);
+}
+
+test "jsKey and jsMouseButton drop unmapped codes" {
+    try t.expectEqual(Key.Space, jsKey(32).?);
+    try t.expectEqual(@as(?Key, null), jsKey(16)); // Shift
+    try t.expectEqual(@as(?Key, null), jsKey(300)); // out of u8 range
+    try t.expectEqual(MouseButton.Right, jsMouseButton(2).?);
+    try t.expectEqual(@as(?MouseButton, null), jsMouseButton(3)); // "back" button
+}
+
+pub fn run(comptime App: type, io: std.Io) void {
     validateApp(App);
 
     if (is_wasm) {
         const Exports = struct {
-            export fn onInit(seed: c_ulong) void {
-                App.onInit(seed);
+            export fn onInit() void {
+                App.onInit(wasm_io);
             }
             export fn onResize(w: c_uint, h: c_uint, s: f32) void {
                 App.onResize(w, h, s);
             }
-            export fn onKeyDown(key: Key) void {
+            export fn onKeyDown(key_code: u32) void {
+                const key = jsKey(key_code) orelse return logWarn("Unmapped JS keyCode: {d}", .{key_code});
                 App.onKeyDown(key);
             }
-            export fn onKeyUp(key: Key) void {
+            export fn onKeyUp(key_code: u32) void {
+                const key = jsKey(key_code) orelse return logWarn("Unmapped JS keyCode: {d}", .{key_code});
                 App.onKeyUp(key);
             }
-            export fn onMouseDown(button: MouseButton, x: f32, y: f32) void {
-                App.onMouseDown(button, x, y);
+            export fn onMouseDown(button: u32, x: f32, y: f32) void {
+                const b = jsMouseButton(button) orelse return logWarn("Unmapped JS mouse button: {d}", .{button});
+                App.onMouseDown(b, x, y);
             }
-            export fn onMouseUp(button: MouseButton, x: f32, y: f32) void {
-                App.onMouseUp(button, x, y);
+            export fn onMouseUp(button: u32, x: f32, y: f32) void {
+                const b = jsMouseButton(button) orelse return logWarn("Unmapped JS mouse button: {d}", .{button});
+                App.onMouseUp(b, x, y);
             }
             export fn onMouseMove(x: f32, y: f32) void {
                 App.onMouseMove(x, y);
@@ -605,6 +629,6 @@ pub fn run(comptime App: type) void {
         };
         _ = Exports;
     } else {
-        sdl.run(App);
+        sdl.run(App, io);
     }
 }

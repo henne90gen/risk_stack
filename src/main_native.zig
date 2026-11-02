@@ -7,8 +7,8 @@ test {
     t.refAllDecls(@This());
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     if (comptime @import("builtin").target.cpu.arch != .wasm32) {
-        m.p.run(m.RiskStackApp);
+        m.p.run(m.RiskStackApp, init.io);
     }
 }

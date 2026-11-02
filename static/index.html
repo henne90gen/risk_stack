@@ -57,6 +57,19 @@
                         console.error(getString(ptr, len));
                     },
 
+                    // Backing for the Zig-side std.Io (see main_wasm.zig).
+                    dateNow() {
+                        return Date.now();
+                    },
+                    performanceNow() {
+                        return performance.now();
+                    },
+                    getRandomValues(ptr, len) {
+                        crypto.getRandomValues(
+                            new Uint8Array(wasmMemory.buffer, ptr, len),
+                        );
+                    },
+
 
                     ...webgl,
                 };
@@ -102,15 +115,28 @@
                 canvas.addEventListener("mousemove", (e) => {
                     onMouseMove(e.clientX, e.clientY);
                 });
-                canvas.addEventListener("wheel", (e) => {
-                    onMouseWheel(e.deltaY * -0.05);
-                });
+                // Normalise to wheel notches (SDL's wheel.y): browsers report
+                // roughly 100 pixels or 3 lines per notch, depending on deltaMode.
+                canvas.addEventListener(
+                    "wheel",
+                    (e) => {
+                        e.preventDefault();
+                        const notches =
+                            e.deltaMode === WheelEvent.DOM_DELTA_PIXEL
+                                ? e.deltaY / 100
+                                : e.deltaMode === WheelEvent.DOM_DELTA_LINE
+                                  ? e.deltaY / 3
+                                  : e.deltaY;
+                        onMouseWheel(-notches);
+                    },
+                    { passive: false },
+                );
 
                 // -------------------------------------------------------------------------
                 // Init and run loop
                 // -------------------------------------------------------------------------
 
-                onInit(Date.now());
+                onInit();
 
                 function resize() {
                     const dpr = window.devicePixelRatio || 1;
