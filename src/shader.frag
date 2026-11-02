@@ -18,6 +18,6 @@ void main() {
         vec4 mask = texture(uFontTexture, vUV);
         fragColor = vec4(vColor.rgb, mask.r);
     } else {
-        fragColor = vec4(1.0);
+        fragColor = vColor;
     }
 }

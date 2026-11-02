@@ -78,52 +78,99 @@ pub const Atlas = struct {
     }
 };
 
-/// Renders `faces` into a single atlas, `cards_per_row` cards per row, with
-/// the cards as large as possible without exceeding `max_width` x `max_height`.
-pub fn renderAtlas(allocator: std.mem.Allocator, faces: []const Card, cards_per_row: usize, max_width: usize, max_height: usize) !Atlas {
-    const rows = try std.math.divCeil(usize, faces.len, cards_per_row);
-    const scale = @min(
-        @as(f64, @floatFromInt(max_width)) / @as(f64, @floatFromInt(cards_per_row * width)),
-        @as(f64, @floatFromInt(max_height)) / @as(f64, @floatFromInt(rows * height)),
-    );
-    const card_width: usize = @intFromFloat(@floor(width * scale));
-    const card_height: usize = @intFromFloat(@floor(height * scale));
+/// Renders an atlas one card at a time, so the caller can keep drawing frames
+/// (e.g. a loading screen) in between.
+pub const AtlasRenderer = struct {
+    allocator: std.mem.Allocator,
+    faces: []const Card,
+    /// Owned until `finish` hands it over.
+    atlas: ?Atlas,
+    scale: f64,
+    font: Font,
+    /// Scratch memory, reset after every card.
+    arena: std.heap.ArenaAllocator,
+    /// Index of the next card to render.
+    next: usize = 0,
 
-    var atlas = Atlas{
-        .buffer = try allocator.alloc(z2d.pixel.RGBA, cards_per_row * card_width * rows * card_height),
-        .width = cards_per_row * card_width,
-        .height = rows * card_height,
-        .card_width = card_width,
-        .card_height = card_height,
-        .cards_per_row = cards_per_row,
-    };
-    errdefer atlas.deinit(allocator);
+    /// `faces` must outlive the renderer.
+    pub fn init(allocator: std.mem.Allocator, faces: []const Card, cards_per_row: usize, max_width: usize, max_height: usize) !AtlasRenderer {
+        const rows = try std.math.divCeil(usize, faces.len, cards_per_row);
+        const scale = @min(
+            @as(f64, @floatFromInt(max_width)) / @as(f64, @floatFromInt(cards_per_row * width)),
+            @as(f64, @floatFromInt(max_height)) / @as(f64, @floatFromInt(rows * height)),
+        );
+        const card_width: usize = @intFromFloat(@floor(width * scale));
+        const card_height: usize = @intFromFloat(@floor(height * scale));
 
-    var surface = z2d.Surface.initBuffer(.image_surface_rgba, null, atlas.buffer, @intCast(atlas.width), @intCast(atlas.height));
-
-    var font = try Font.init();
-    defer font.deinit();
-
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    for (faces, 0..) |face, i| {
-        const origin = atlas.cardOrigin(i);
-        const x: f64 = @floatFromInt(origin[0]);
-        const y: f64 = @floatFromInt(origin[1]);
-        var canvas = Canvas{
-            .alloc = arena.allocator(),
-            .surface = &surface,
-            .font = &font,
-            .ctm = z2d.Transformation.identity.translate(x, y).scale(scale, scale),
+        var atlas = Atlas{
+            .buffer = try allocator.alloc(z2d.pixel.RGBA, cards_per_row * card_width * rows * card_height),
+            .width = cards_per_row * card_width,
+            .height = rows * card_height,
+            .card_width = card_width,
+            .card_height = card_height,
+            .cards_per_row = cards_per_row,
         };
-        try drawCard(&canvas, face, origin, card_width, card_height);
-        _ = arena.reset(.retain_capacity);
+        errdefer atlas.deinit(allocator);
+        @memset(atlas.buffer, std.mem.zeroes(z2d.pixel.RGBA));
+
+        return .{
+            .allocator = allocator,
+            .faces = faces,
+            .atlas = atlas,
+            .scale = scale,
+            .font = try Font.init(),
+            .arena = .init(allocator),
+        };
     }
 
-    for (atlas.buffer) |*px| px.* = px.demultiply();
-    return atlas;
-}
+    pub fn deinit(self: *AtlasRenderer) void {
+        if (self.atlas) |*atlas| atlas.deinit(self.allocator);
+        self.font.deinit();
+        self.arena.deinit();
+    }
+
+    /// Renders the next card. Returns false once every card has been rendered.
+    pub fn step(self: *AtlasRenderer) !bool {
+        if (self.next >= self.faces.len) return false;
+        const atlas = &self.atlas.?;
+        defer _ = self.arena.reset(.retain_capacity);
+
+        // Wraps the buffer without clearing it, unlike `Surface.initBuffer`.
+        var surface: z2d.Surface = .{ .image_surface_rgba = .{
+            .width = @intCast(atlas.width),
+            .height = @intCast(atlas.height),
+            .buf = atlas.buffer,
+        } };
+
+        const origin = atlas.cardOrigin(self.next);
+        var canvas = Canvas{
+            .alloc = self.arena.allocator(),
+            .surface = &surface,
+            .font = &self.font,
+            .ctm = z2d.Transformation.identity
+                .translate(@floatFromInt(origin[0]), @floatFromInt(origin[1]))
+                .scale(self.scale, self.scale),
+        };
+        try drawCard(&canvas, self.faces[self.next], origin, atlas.card_width, atlas.card_height);
+        self.next += 1;
+        return self.next < self.faces.len;
+    }
+
+    /// Number of cards rendered so far, out of `faces.len`.
+    pub fn done(self: *const AtlasRenderer) usize {
+        return self.next;
+    }
+
+    /// Converts the atlas to straight alpha and hands it over to the caller.
+    /// Call once `step` has returned false.
+    pub fn finish(self: *AtlasRenderer) Atlas {
+        std.debug.assert(self.next == self.faces.len);
+        const atlas = self.atlas.?;
+        self.atlas = null;
+        for (atlas.buffer) |*px| px.* = px.demultiply();
+        return atlas;
+    }
+};
 
 // ---------------------------------------------------------------------------
 // Card layouts
@@ -738,9 +785,12 @@ fn vec(px: z2d.pixel.RGBA) @Vector(4, u32) {
     return .{ px.r, px.g, px.b, px.a };
 }
 
-test "renderAtlas renders every card" {
+test "AtlasRenderer renders every card" {
     const faces = std.enums.values(Card);
-    var atlas = try renderAtlas(t.allocator, faces, 8, 400, 215);
+    var renderer = try AtlasRenderer.init(t.allocator, faces, 8 , 400, 215);
+    defer renderer.deinit();
+    while (try renderer.step()) {}
+    var atlas = renderer.finish();
     defer atlas.deinit(t.allocator);
 
     try t.expectEqual(@as(usize, 50), atlas.card_width);

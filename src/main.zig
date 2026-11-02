@@ -173,6 +173,9 @@ const AppState = struct {
     animation: AnimationState,
     font: text.Font = .{},
     cards: CardTextures = .{},
+    /// Renders the card atlas a card per frame; null once the cards are uploaded.
+    card_loader: ?card_art.AtlasRenderer = null,
+    loading_started: std.Io.Timestamp = .zero,
 
     prng: std.Random.DefaultPrng,
     simulation: f.GameSimulation = undefined,
@@ -195,9 +198,9 @@ const AppState = struct {
     }
 
     pub fn deinit(self: *AppState) void {
+        if (self.card_loader) |*loader| loader.deinit();
         self.simulation.deinit();
         self.font.deinit(self.allocator);
-        self.cards.freePixels(self.allocator);
         self.flip_three_stack.deinit(self.allocator);
         self.animation.queue.deinit(self.allocator);
         self.frame_arena.deinit();
@@ -302,32 +305,8 @@ pub const RiskStackApp = struct {
 
         p.glBindVertexArray(0);
 
-        app_state.cards = renderCardTextures(app_state.io, app_state.allocator, &atlas_cards, 8, 1920, 1080) catch |err| std.debug.panic("failed to load card textures: {}", .{err});
-        p.glGenTextures(1, @as([*]u32, @ptrCast(&app_state.gl.card_atlas_texture)));
-        p.glActiveTexture(p.GL_TEXTURE0);
-        p.glBindTexture(p.GL_TEXTURE_2D, app_state.gl.card_atlas_texture);
-
-        p.glTexImage2D(
-            p.GL_TEXTURE_2D,
-            0,
-            @intCast(p.GL_RGBA8),
-            @intCast(app_state.cards.buffer_width),
-            @intCast(app_state.cards.buffer_height),
-            0,
-            p.GL_RGBA,
-            p.GL_UNSIGNED_BYTE,
-            app_state.cards.pixels.?.bytes().ptr,
-            app_state.cards.pixels.?.bytes().len,
-        );
-        app_state.cards.freePixels(app_state.allocator);
-
-        p.glTexParameteri(p.GL_TEXTURE_2D, p.GL_TEXTURE_MIN_FILTER, @intCast(p.GL_LINEAR_MIPMAP_LINEAR));
-        p.glTexParameteri(p.GL_TEXTURE_2D, p.GL_TEXTURE_MAG_FILTER, @intCast(p.GL_LINEAR));
-        p.glTexParameteri(p.GL_TEXTURE_2D, p.GL_TEXTURE_WRAP_S, @intCast(p.GL_CLAMP_TO_EDGE));
-        p.glTexParameteri(p.GL_TEXTURE_2D, p.GL_TEXTURE_WRAP_T, @intCast(p.GL_CLAMP_TO_EDGE));
-        p.glGenerateMipmap(p.GL_TEXTURE_2D);
-
-        p.glBindTexture(p.GL_TEXTURE_2D, 0);
+        app_state.loading_started = std.Io.Clock.awake.now(io);
+        app_state.card_loader = card_art.AtlasRenderer.init(app_state.allocator, &atlas_cards, 8, 1920, 1080) catch |err| std.debug.panic("failed to start rendering the cards: {}", .{err});
 
         p.glUseProgram(app_state.gl.tri_program);
 
@@ -440,6 +419,13 @@ pub const RiskStackApp = struct {
     }
 
     pub fn onAnimationFrame() void {
+        if (app_state.card_loader != null) {
+            loadNextCard() catch |err| std.debug.panic("failed to render the cards: {}", .{err});
+            if (app_state.card_loader != null) {
+                renderLoadingScreen() catch |err| p.logErr("render failed: {}", .{err});
+                return;
+            }
+        }
         update() catch |err| p.logErr("update failed: {}", .{err});
         render() catch |err| p.logErr("render failed: {}", .{err});
     }
@@ -503,6 +489,76 @@ pub const RiskStackApp = struct {
                 else => {},
             }
         }
+    }
+
+    /// Renders one more card; uploads the atlas once all cards are done.
+    fn loadNextCard() !void {
+        const loader = &app_state.card_loader.?;
+        if (try loader.step()) return;
+
+        var atlas = loader.finish();
+        defer atlas.deinit(app_state.allocator);
+        loader.deinit();
+        app_state.card_loader = null;
+
+        app_state.cards = cardTexturesFromAtlas(&atlas);
+        uploadCardTextures(&atlas);
+
+        const elapsed = app_state.loading_started.durationTo(std.Io.Clock.awake.now(app_state.io));
+        p.logInfo("rendered all cards into a single texture: {}x{} in {}ms", .{ atlas.width, atlas.height, elapsed.toMilliseconds() });
+    }
+
+    fn renderLoadingScreen() !void {
+        _ = app_state.frame_arena.reset(.retain_capacity);
+        const frame_allocator = app_state.frame_arena.allocator();
+
+        p.glClearColor(0.1, 0.1, 0.1, 1.0);
+        p.glClear(p.GL_COLOR_BUFFER_BIT);
+
+        p.glUseProgram(app_state.gl.tri_program);
+        p.glBindVertexArray(app_state.gl.tri_vao);
+
+        // Same projection as the game, but unaffected by zoom.
+        const identity = zm.identity();
+        p.glUniformMatrix4fv(app_state.gl.u_loc_view, 1, p.GL_TRUE, zm.arrNPtr(&identity));
+        const ar = app_state.aspect_ratio;
+        const ortho = zm.orthographicOffCenterRh(-ar, ar, 1.0, -1.0, -1.0, 1.0);
+        p.glUniformMatrix4fv(app_state.gl.u_loc_projection, 1, p.GL_TRUE, zm.arrNPtr(&ortho));
+
+        var instances: std.ArrayList(Instance) = try .initCapacity(frame_allocator, 64);
+
+        const loader = &app_state.card_loader.?;
+        const done: f32 = @floatFromInt(loader.done());
+        const total: f32 = @floatFromInt(loader.faces.len);
+        const seconds: f32 = @floatCast(@as(f64, @floatFromInt(app_state.loading_started.untilNow(app_state.io, .awake).toNanoseconds())) / std.time.ns_per_s);
+
+        // Spinner: a ring of dots, the brightest one leading, one turn per second.
+        const dot_count = 10;
+        for (0..dot_count) |i| {
+            const fi: f32 = @floatFromInt(i);
+            const angle = -seconds * 2.0 * std.math.pi + fi * 2.0 * std.math.pi / dot_count;
+            const alpha = 1.0 - fi / dot_count;
+            try addQuad(frame_allocator, &instances, 0.12 * @cos(angle), 0.2 + 0.12 * @sin(angle), 0.035, 0.035, angle, zm.f32x4(0.0, 1.0, 1.0, alpha));
+        }
+
+        const label = try std.fmt.allocPrint(frame_allocator, "Generating cards {d}/{d}", .{ loader.done(), loader.faces.len });
+        const font_scale = 0.06;
+        try addText(frame_allocator, &instances, label, .{
+            .y = -0.1,
+            .offset_anchor_x = -0.5 * app_state.font.textDimensions(label, font_scale)[0],
+            .scale = font_scale,
+        });
+
+        // Progress bar.
+        const bar_w: f32 = 0.8;
+        const bar_h: f32 = 0.025;
+        const fill_w = bar_w * done / total;
+        try addQuad(frame_allocator, &instances, 0.0, -0.22, bar_w, bar_h, 0.0, zm.f32x4(1.0, 1.0, 1.0, 0.15));
+        try addQuad(frame_allocator, &instances, (fill_w - bar_w) / 2.0, -0.22, fill_w, bar_h, 0.0, zm.f32x4(0.0, 1.0, 1.0, 1.0));
+
+        p.glActiveTexture(p.GL_TEXTURE1);
+        p.glBindTexture(p.GL_TEXTURE_2D, app_state.gl.font_atlas_texture);
+        drawInstances(instances.items);
     }
 
     fn render() !void {
@@ -570,40 +626,6 @@ pub const RiskStackApp = struct {
             }
         }.call;
 
-        const TextParameters = struct {
-            x: f32 = 0.0,
-            y: f32 = 0.0,
-            offset_anchor_x: f32 = 0.0,
-            offset_anchor_y: f32 = 0.0,
-            angle: f32 = 0.0,
-            scale: f32 = 1.0,
-        };
-
-        const addText = struct {
-            fn call(
-                alloc: std.mem.Allocator,
-                inst: *std.ArrayList(Instance),
-                txt: []const u8,
-                text_params: TextParameters,
-            ) !void {
-                var letter_draw_data = try app_state.font.drawText(alloc, txt, text_params.scale);
-                defer letter_draw_data.deinit(alloc);
-
-                const rotation_matrix = zm.rotationZ(text_params.angle);
-                const translation_matrix = zm.translation(text_params.x, text_params.y, 0.0);
-                for (letter_draw_data.items) |item| {
-                    const letter_translation_matrix = zm.translation(item.x + text_params.offset_anchor_x, item.y + text_params.offset_anchor_y, 0.0);
-                    const scale_matrix = zm.scaling(item.width, item.height, 1.0);
-                    const model_matrix = zm.mul(scale_matrix, zm.mul(zm.mul(letter_translation_matrix, rotation_matrix), translation_matrix));
-                    try inst.append(alloc, .{
-                        .model = zm.transpose(model_matrix),
-                        .uv_rect = item.uv_rect,
-                        .color = zm.f32x4(0, 1.0, 1.0, 1.0),
-                        .render_type = 1,
-                    });
-                }
-            }
-        }.call;
 
         // Deck: single face-down card at the center.
         try addCard(frame_allocator, &instances, &app_state.cards, back_texture_index, 0.0, 0.0, std.math.pi, card_w, card_h);
@@ -814,19 +836,7 @@ pub const RiskStackApp = struct {
         p.glActiveTexture(p.GL_TEXTURE1);
         p.glBindTexture(p.GL_TEXTURE_2D, app_state.gl.font_atlas_texture);
 
-        p.glBindBuffer(p.GL_ARRAY_BUFFER, app_state.gl.instance_vbo);
-        p.glBufferData(
-            p.GL_ARRAY_BUFFER,
-            instances.items.len * @sizeOf(Instance),
-            instances.items.ptr,
-            p.GL_DYNAMIC_DRAW,
-        );
-        p.glBindBuffer(p.GL_ARRAY_BUFFER, 0);
-        p.glDrawArraysInstanced(p.GL_TRIANGLES, 0, 6, @intCast(instances.items.len));
-
-        p.glBindVertexArray(0);
-        p.glBindTexture(p.GL_TEXTURE_2D, 0);
-        p.glUseProgram(0);
+        drawInstances(instances.items);
     }
 
     fn saveSzenario() !void {
@@ -837,6 +847,39 @@ pub const RiskStackApp = struct {
         p.logInfo("saving szenario - done", .{});
     }
 };
+
+const TextParameters = struct {
+    x: f32 = 0.0,
+    y: f32 = 0.0,
+    offset_anchor_x: f32 = 0.0,
+    offset_anchor_y: f32 = 0.0,
+    angle: f32 = 0.0,
+    scale: f32 = 1.0,
+};
+
+fn addText(
+    alloc: std.mem.Allocator,
+    inst: *std.ArrayList(Instance),
+    txt: []const u8,
+    text_params: TextParameters,
+) !void {
+    var letter_draw_data = try app_state.font.drawText(alloc, txt, text_params.scale);
+    defer letter_draw_data.deinit(alloc);
+
+    const rotation_matrix = zm.rotationZ(text_params.angle);
+    const translation_matrix = zm.translation(text_params.x, text_params.y, 0.0);
+    for (letter_draw_data.items) |item| {
+        const letter_translation_matrix = zm.translation(item.x + text_params.offset_anchor_x, item.y + text_params.offset_anchor_y, 0.0);
+        const scale_matrix = zm.scaling(item.width, item.height, 1.0);
+        const model_matrix = zm.mul(scale_matrix, zm.mul(zm.mul(letter_translation_matrix, rotation_matrix), translation_matrix));
+        try inst.append(alloc, .{
+            .model = zm.transpose(model_matrix),
+            .uv_rect = item.uv_rect,
+            .color = zm.f32x4(0, 1.0, 1.0, 1.0),
+            .render_type = 1,
+        });
+    }
+}
 
 fn glInitShader(src: [:0]const u8, len: i32, typ: u32) !u32 {
     const shader = p.glCreateShader(typ);
@@ -885,29 +928,18 @@ const CardAtlasEntry = struct {
 const CardTextures = struct {
     buffer_width: usize = 0,
     buffer_height: usize = 0,
-    /// Rendered atlas, only kept until it is uploaded to the GPU.
-    pixels: ?card_art.Atlas = null,
     card_atlas: [atlas_cards.len]CardAtlasEntry = [_]CardAtlasEntry{.{}} ** atlas_cards.len,
-
-    fn freePixels(self: *CardTextures, allocator: std.mem.Allocator) void {
-        if (self.pixels) |*pixels| pixels.deinit(allocator);
-        self.pixels = null;
-    }
 };
 
-fn renderCardTextures(io: std.Io, allocator: std.mem.Allocator, faces: []const card_art.Card, cards_per_row: usize, max_width: usize, max_height: usize) !CardTextures {
-    const start_time = std.Io.Clock.real.now(io);
-
-    const atlas = try card_art.renderAtlas(allocator, faces, cards_per_row, max_width, max_height);
+fn cardTexturesFromAtlas(atlas: *const card_art.Atlas) CardTextures {
     var result = CardTextures{
         .buffer_width = atlas.width,
         .buffer_height = atlas.height,
-        .pixels = atlas,
     };
 
     const buffer_width_f: f32 = @floatFromInt(atlas.width);
     const buffer_height_f: f32 = @floatFromInt(atlas.height);
-    for (0..faces.len) |i| {
+    for (0..atlas_cards.len) |i| {
         const origin = atlas.cardOrigin(i);
         const start_col_f: f32 = @floatFromInt(origin[0]);
         const start_row_f: f32 = @floatFromInt(origin[1]);
@@ -919,15 +951,60 @@ fn renderCardTextures(io: std.Io, allocator: std.mem.Allocator, faces: []const c
         card.bottom_right_u = start_col_f / buffer_width_f;
         card.bottom_right_v = end_row_f / buffer_height_f;
     }
-
-    const elapsed = start_time.durationTo(std.Io.Clock.real.now(io));
-    const elapsed_ms: f64 = @floatFromInt(elapsed.toMilliseconds());
-    const elapsed_s = elapsed_ms / std.time.ms_per_s;
-    p.logInfo("rendered all cards into a single texture: {}x{} in {}s", .{
-        result.buffer_width,
-        result.buffer_height,
-        elapsed_s,
-    });
-
     return result;
+}
+
+fn uploadCardTextures(atlas: *const card_art.Atlas) void {
+    p.glGenTextures(1, @as([*]u32, @ptrCast(&app_state.gl.card_atlas_texture)));
+    p.glActiveTexture(p.GL_TEXTURE0);
+    p.glBindTexture(p.GL_TEXTURE_2D, app_state.gl.card_atlas_texture);
+    p.glTexImage2D(
+        p.GL_TEXTURE_2D,
+        0,
+        @intCast(p.GL_RGBA8),
+        @intCast(atlas.width),
+        @intCast(atlas.height),
+        0,
+        p.GL_RGBA,
+        p.GL_UNSIGNED_BYTE,
+        atlas.bytes().ptr,
+        atlas.bytes().len,
+    );
+    p.glTexParameteri(p.GL_TEXTURE_2D, p.GL_TEXTURE_MIN_FILTER, @intCast(p.GL_LINEAR_MIPMAP_LINEAR));
+    p.glTexParameteri(p.GL_TEXTURE_2D, p.GL_TEXTURE_MAG_FILTER, @intCast(p.GL_LINEAR));
+    p.glTexParameteri(p.GL_TEXTURE_2D, p.GL_TEXTURE_WRAP_S, @intCast(p.GL_CLAMP_TO_EDGE));
+    p.glTexParameteri(p.GL_TEXTURE_2D, p.GL_TEXTURE_WRAP_T, @intCast(p.GL_CLAMP_TO_EDGE));
+    p.glGenerateMipmap(p.GL_TEXTURE_2D);
+    p.glBindTexture(p.GL_TEXTURE_2D, 0);
+}
+
+/// Uploads `instances` and draws them. Expects the program, VAO and textures
+/// to be bound.
+fn drawInstances(instances: []const Instance) void {
+    p.glBindBuffer(p.GL_ARRAY_BUFFER, app_state.gl.instance_vbo);
+    p.glBufferData(p.GL_ARRAY_BUFFER, instances.len * @sizeOf(Instance), instances.ptr, p.GL_DYNAMIC_DRAW);
+    p.glBindBuffer(p.GL_ARRAY_BUFFER, 0);
+    p.glDrawArraysInstanced(p.GL_TRIANGLES, 0, 6, @intCast(instances.len));
+
+    p.glBindVertexArray(0);
+    p.glBindTexture(p.GL_TEXTURE_2D, 0);
+    p.glUseProgram(0);
+}
+
+/// Solid-colored rectangle centered at (`cx`, `cy`).
+fn addQuad(alloc: std.mem.Allocator, inst: *std.ArrayList(Instance), cx: f32, cy: f32, w: f32, h: f32, angle: f32, color: zm.Vec) !void {
+    const cos_a = @cos(angle);
+    const sin_a = @sin(angle);
+    const m = zm.Mat{
+        zm.f32x4(cos_a * w, sin_a * w, 0, 0),
+        zm.f32x4(-sin_a * h, cos_a * h, 0, 0),
+        zm.f32x4(0, 0, 1, 0),
+        zm.f32x4(cx, cy, 0, 1),
+    };
+    try inst.append(alloc, .{
+        .model = zm.transpose(m),
+        .uv_rect = zm.f32x4(0, 0, 0, 0),
+        .color = color,
+        .render_type = 2,
+    });
 }
