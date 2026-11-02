@@ -931,7 +931,9 @@ pub const GameSimulation = struct {
 
             const drawn = self.deck.cards.pop().?;
             self.cards_played += 1;
-            try self.addEvent(.{ .DrawCard = .{ .player = player, .card = drawn } });
+            if (drawn == .Freeze or drawn == .FlipThree) {
+                try self.addEvent(.{ .DrawCard = .{ .player = target, .card = drawn } });
+            }
             if (drawn == .Freeze) {
                 freeze_count += 1;
                 continue;
@@ -991,6 +993,27 @@ pub const GameSimulation = struct {
         const flip_three_target = available_players.items[random_index];
         std.debug.assert(flip_three_target != player);
         try self.drawThreeCards(player, flip_three_target);
+    }
+
+    test "FlipThree deals every card only to the target" {
+        var tf = try TestFixture.init(t.allocator, 2, &[_]Card{ .Six, .Freeze, .Five });
+        defer tf.deinit();
+        tf.simulation.settings.events_enabled = true;
+        const drawing_player = &tf.simulation.players[0];
+        const target = &tf.simulation.players[1];
+
+        try tf.simulation.drawThreeCards(drawing_player, target);
+
+        var dealt: std.ArrayList(Card) = .empty;
+        defer dealt.deinit(t.allocator);
+        for (tf.simulation.events.items) |event| switch (event) {
+            .DrawCard => |d| {
+                try t.expect(d.player == target);
+                try dealt.append(t.allocator, d.card);
+            },
+            else => {},
+        };
+        try t.expectEqualSlices(Card, &.{ .Five, .Freeze, .Six }, dealt.items);
     }
 
     test "handleFlipThree simple case" {
