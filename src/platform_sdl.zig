@@ -9,11 +9,6 @@ const c = @cImport({
     @cInclude("SDL3/SDL_opengl.h");
 });
 
-const png = @cImport({
-    @cInclude("png.h");
-});
-
-const cards = @import("cards.zig");
 test {
     t.refAllDecls(@This());
 }
@@ -62,79 +57,6 @@ fn sdlMouseButtonToJs(button: u8) ?p.MouseButton {
 
 pub fn close() void {
     global_running = false;
-}
-
-const ReadState = struct { data: []const u8, pos: usize };
-pub fn loadTexture(allocator: std.mem.Allocator, path: []const u8) !p.TextureData {
-    // const cards = @import("cards.zig");
-    const card = cards.Card.fromPath(path) orelse
-        std.debug.panic("texture: unknown path '{s}'", .{path});
-    const png_bytes = card.bytes();
-
-    var src = ReadState{ .data = png_bytes, .pos = 0 };
-
-    const png_read = png.png_create_read_struct(
-        png.PNG_LIBPNG_VER_STRING,
-        null,
-        null,
-        null,
-    ) orelse std.debug.panic("png_create_read_struct failed for '{s}'", .{path});
-    defer png.png_destroy_read_struct(@ptrCast(@constCast(&png_read)), null, null);
-
-    const info = png.png_create_info_struct(png_read) orelse
-        std.debug.panic("png_create_info_struct failed for '{s}'", .{path});
-
-    if (png.setjmp(@constCast(&png.png_jmpbuf(png_read)[0])) != 0)
-        std.debug.panic("libpng error while decoding '{s}'", .{path});
-
-    png.png_set_read_fn(png_read, &src, readCallback);
-    png.png_read_info(png_read, info);
-
-    const width = png.png_get_image_width(png_read, info);
-    const height = png.png_get_image_height(png_read, info);
-    const color_type = png.png_get_color_type(png_read, info);
-    const bit_depth = png.png_get_bit_depth(png_read, info);
-
-    if (bit_depth == 16) png.png_set_strip_16(png_read);
-    if (color_type == png.PNG_COLOR_TYPE_PALETTE) png.png_set_palette_to_rgb(png_read);
-    if (color_type == png.PNG_COLOR_TYPE_GRAY and bit_depth < 8)
-        png.png_set_expand_gray_1_2_4_to_8(png_read);
-    if (png.png_get_valid(png_read, info, png.PNG_INFO_tRNS) != 0) png.png_set_tRNS_to_alpha(png_read);
-    if (color_type == png.PNG_COLOR_TYPE_RGB or
-        color_type == png.PNG_COLOR_TYPE_GRAY or
-        color_type == png.PNG_COLOR_TYPE_PALETTE)
-        png.png_set_filler(png_read, 0xFF, png.PNG_FILLER_AFTER);
-    if (color_type == png.PNG_COLOR_TYPE_GRAY or
-        color_type == png.PNG_COLOR_TYPE_GRAY_ALPHA)
-        png.png_set_gray_to_rgb(png_read);
-
-    png.png_read_update_info(png_read, info);
-
-    const row_bytes = width * 4; // RGBA8
-    const pixels = try allocator.alloc(u8, height * row_bytes);
-
-    const rows = try allocator.alloc([*]u8, height);
-    defer allocator.free(rows);
-    for (0..height) |y| rows[y] = pixels[y * row_bytes ..].ptr;
-
-    png.png_read_image(png_read, @ptrCast(rows.ptr));
-
-    return .{ .pixels = pixels, .width = width, .height = height };
-}
-
-fn readCallback(
-    png_read: png.png_structp,
-    buf: png.png_bytep,
-    len: png.png_size_t,
-) callconv(.c) void {
-    const src: *ReadState = @ptrCast(@alignCast(png.png_get_io_ptr(png_read)));
-    const available = src.data.len - src.pos;
-    if (len > available) {
-        png.png_error(png_read, "unexpected end of PNG data");
-        return;
-    }
-    @memcpy(buf[0..len], src.data[src.pos..][0..len]);
-    src.pos += len;
 }
 
 // ---------------------------------------------------------------------------

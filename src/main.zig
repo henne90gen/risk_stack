@@ -5,6 +5,7 @@ pub const p = @import("platform.zig");
 const zm = @import("zmath");
 const f = @import("risk_stack.zig");
 const text = @import("text.zig");
+const card_art = @import("cards.zig");
 
 test {
     t.refAllDecls(@This());
@@ -44,32 +45,33 @@ const Instance = extern struct {
     render_type: i32 align(1),
 };
 
-const card_texture_paths = [_][]const u8{
-    "cards/0.png",
-    "cards/1.png",
-    "cards/2.png",
-    "cards/3.png",
-    "cards/4.png",
-    "cards/5.png",
-    "cards/6.png",
-    "cards/7.png",
-    "cards/8.png",
-    "cards/9.png",
-    "cards/10.png",
-    "cards/11.png",
-    "cards/12.png",
-    "cards/second_chance.png",
-    "cards/freeze.png",
-    "cards/flip_three.png",
-    "cards/plus_2.png",
-    "cards/plus_4.png",
-    "cards/plus_6.png",
-    "cards/plus_8.png",
-    "cards/plus_10.png",
-    "cards/x2.png",
-    "cards/back.png",
+/// Cards in atlas order, indexed by `cardTextureIndex`.
+const atlas_cards = [_]card_art.Card{
+    .@"0",
+    .@"1",
+    .@"2",
+    .@"3",
+    .@"4",
+    .@"5",
+    .@"6",
+    .@"7",
+    .@"8",
+    .@"9",
+    .@"10",
+    .@"11",
+    .@"12",
+    .second_chance,
+    .freeze,
+    .flip_three,
+    .plus_2,
+    .plus_4,
+    .plus_6,
+    .plus_8,
+    .plus_10,
+    .x2,
+    .back,
 };
-const back_texture_index: usize = card_texture_paths.len - 1;
+const back_texture_index: usize = atlas_cards.len - 1;
 
 fn cardTextureIndex(card: f.Card) usize {
     return switch (card) {
@@ -285,7 +287,7 @@ pub const RiskStackApp = struct {
 
         p.glBindVertexArray(0);
 
-        app_state.cards = loadCardTextures(app_state.allocator, &card_texture_paths, 8, 3) catch |err| std.debug.panic("failed to load card textures: {}", .{err});
+        app_state.cards = renderCardTextures(app_state.allocator, &atlas_cards, 8, 1920, 1080) catch |err| std.debug.panic("failed to load card textures: {}", .{err});
         p.glGenTextures(1, @as([*]u32, @ptrCast(&app_state.gl.card_atlas_texture)));
         p.glActiveTexture(p.GL_TEXTURE0);
         p.glBindTexture(p.GL_TEXTURE_2D, app_state.gl.card_atlas_texture);
@@ -866,63 +868,33 @@ const CardTextures = struct {
     buffer_width: usize = 0,
     buffer_height: usize = 0,
     texture_buffer: []u8 = undefined,
-    card_atlas: [card_texture_paths.len]CardAtlasEntry = [_]CardAtlasEntry{.{}} ** card_texture_paths.len,
+    card_atlas: [atlas_cards.len]CardAtlasEntry = [_]CardAtlasEntry{.{}} ** atlas_cards.len,
 };
 
-fn loadCardTextures(allocator: std.mem.Allocator, texture_paths: []const []const u8, cards_per_row: u32, cards_per_col: u32) !CardTextures {
-    var result = CardTextures{};
+fn renderCardTextures(allocator: std.mem.Allocator, faces: []const card_art.Card, cards_per_row: usize, max_width: usize, max_height: usize) !CardTextures {
+    const atlas = try card_art.renderAtlas(allocator, faces, cards_per_row, max_width, max_height);
+    var result = CardTextures{
+        .buffer_width = atlas.width,
+        .buffer_height = atlas.height,
+        .texture_buffer = atlas.bytes(),
+    };
 
-    var card_width: usize = 0;
-    var card_height: usize = 0;
-    for (texture_paths, 0..) |path, i| {
-        const td = try p.texture(allocator, path);
-        defer allocator.free(td.pixels);
-
-        if (card_width == 0 or card_height == 0) {
-            card_width = td.width;
-            card_height = td.height;
-            result.buffer_width = cards_per_row * card_width;
-            result.buffer_height = cards_per_col * card_height;
-            result.texture_buffer = try allocator.alloc(u8, result.buffer_width * result.buffer_height * 4);
-            p.logInfo("Allocated buffer {}x{}", .{ result.buffer_width, result.buffer_height });
-        } else if (card_width != td.width or card_height != td.height) {
-            p.logErr("expected dimensions {}x{} don't match dimensions of card '{s}': {}x{}", .{ card_width, card_height, path, td.width, td.height });
-            return error.InconsistentCardPixelDimensions;
-        }
-
-        p.logInfo("Adding card '{s}' ({})", .{ path, i });
-
-        const start_row = (@divTrunc(i, cards_per_row)) * card_height;
-        const start_col = (i % cards_per_row) * card_width;
-        for (0..card_height) |row| {
-            for (0..card_width) |col| {
-                const final_row = start_row + row;
-                const final_col = start_col + col;
-                const buffer_index = (final_row * result.buffer_width + final_col) * 4;
-                const pixel_index = (row * card_width + col) * 4;
-                result.texture_buffer[buffer_index + 0] = td.pixels[pixel_index + 0];
-                result.texture_buffer[buffer_index + 1] = td.pixels[pixel_index + 1];
-                result.texture_buffer[buffer_index + 2] = td.pixels[pixel_index + 2];
-                result.texture_buffer[buffer_index + 3] = td.pixels[pixel_index + 3];
-            }
-        }
-
-        const buffer_height_f: f32 = @floatFromInt(result.buffer_height);
-        const buffer_width_f: f32 = @floatFromInt(result.buffer_width);
-        const start_row_f: f32 = @floatFromInt(start_row);
-        const start_col_f: f32 = @floatFromInt(start_col);
-        const end_row_f: f32 = @floatFromInt(start_row + td.height);
-        const end_col_f: f32 = @floatFromInt(start_col + td.width);
+    const buffer_width_f: f32 = @floatFromInt(atlas.width);
+    const buffer_height_f: f32 = @floatFromInt(atlas.height);
+    for (0..faces.len) |i| {
+        const origin = atlas.cardOrigin(i);
+        const start_col_f: f32 = @floatFromInt(origin[0]);
+        const start_row_f: f32 = @floatFromInt(origin[1]);
+        const end_col_f: f32 = @floatFromInt(origin[0] + atlas.card_width);
+        const end_row_f: f32 = @floatFromInt(origin[1] + atlas.card_height);
         var card = &result.card_atlas[i];
         card.top_left_u = end_col_f / buffer_width_f;
         card.top_left_v = start_row_f / buffer_height_f;
         card.bottom_right_u = start_col_f / buffer_width_f;
         card.bottom_right_v = end_row_f / buffer_height_f;
-        p.logInfo("Pixels: {}x{} - {}x{}", .{ start_col_f, start_row_f, end_col_f, end_row_f });
-        p.logInfo("UV: {}x{} - {}x{}", .{ card.top_left_u, card.top_left_v, card.bottom_right_u, card.bottom_right_v });
     }
 
-    p.logInfo("imported all cards into a single texture: {}x{}", .{ result.buffer_width, result.buffer_height });
+    p.logInfo("rendered all cards into a single texture: {}x{}", .{ result.buffer_width, result.buffer_height });
 
     return result;
 }

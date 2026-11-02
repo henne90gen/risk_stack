@@ -141,18 +141,6 @@ const wasm = if (is_wasm) struct {
     extern fn logWarn(ptr: [*]const u8, len: usize) void;
     extern fn logErr(ptr: [*]const u8, len: usize) void;
 
-    /// Decode the image at `path` using browser APIs and write its RGBA pixels
-    /// into `buf[0..buf_len]`. Writes the image dimensions and actual pixel
-    /// byte count to the three out-parameters. Throws when the path is unknown.
-    extern fn getTexture(
-        path_ptr: [*]const u8,
-        path_len: usize,
-        buf_ptr: [*]u8,
-        buf_len: usize,
-        out_width: *u32,
-        out_height: *u32,
-        out_pixels_len: *usize,
-    ) void;
 } else struct {};
 
 // ---------------------------------------------------------------------------
@@ -544,50 +532,6 @@ pub fn logErr(comptime fmt: []const u8, args: anytype) void {
         wasm.logErr(msg.ptr, msg.len);
     } else {
         std.log.err(fmt, args);
-    }
-}
-
-/// Decoded RGBA pixel data returned by `texture()`.
-pub const TextureData = struct {
-    /// Raw RGBA8 pixels, row-major, top-to-bottom.
-    pixels: []const u8,
-    width: u32,
-    height: u32,
-};
-
-/// Decode the image at `path` (e.g. "cards/0.png") and return its RGBA pixels.
-///
-/// On wasm the browser decodes the image via an OffscreenCanvas; the result is
-/// written into a static per-call buffer and valid until the next call.
-/// On native libpng decodes the embedded PNG bytes; memory is allocated from
-/// the page allocator and owned by the caller — free `result.pixels` when done.
-///
-/// Panics when the path is unknown.
-pub fn texture(allocator: std.mem.Allocator, path: []const u8) !TextureData {
-    if (is_wasm) {
-        // The JS host decodes the image and writes RGBA pixels into our buffer.
-        // 1024 × 1024 × 4 = 4 MiB — enough for any card image.
-        const max_pixels = 1024 * 1024 * 4;
-        var buf = try allocator.alloc(u8, max_pixels);
-        var out_width: u32 = 0;
-        var out_height: u32 = 0;
-        var out_pixels_len: usize = 0;
-        wasm.getTexture(
-            path.ptr,
-            path.len,
-            buf.ptr,
-            buf.len,
-            &out_width,
-            &out_height,
-            &out_pixels_len,
-        );
-        return .{
-            .pixels = buf[0..out_pixels_len],
-            .width = out_width,
-            .height = out_height,
-        };
-    } else {
-        return try sdl.loadTexture(allocator, path);
     }
 }
 
