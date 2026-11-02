@@ -9,6 +9,6 @@ test {
 
 pub fn main(init: std.process.Init) !void {
     if (comptime @import("builtin").target.cpu.arch != .wasm32) {
-        m.p.run(m.RiskStackApp, init.io);
+        m.p.run(m.RiskStackApp, init.gpa, init.io);
     }
 }

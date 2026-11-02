@@ -544,7 +544,8 @@ pub fn close() void {
 
 fn validateApp(comptime App: type) void {
     const required = .{
-        .{ "onInit", fn (std.Io) void },
+        .{ "onInit", fn (std.mem.Allocator, std.Io) void },
+        .{ "onDeinit", fn () void },
         .{ "onResize", fn (c_uint, c_uint, f32) void },
         .{ "onKeyDown", fn (Key) void },
         .{ "onKeyUp", fn (Key) void },
@@ -590,13 +591,13 @@ test "jsKey and jsMouseButton drop unmapped codes" {
     try t.expectEqual(@as(?MouseButton, null), jsMouseButton(3)); // "back" button
 }
 
-pub fn run(comptime App: type, io: std.Io) void {
+pub fn run(comptime App: type, gpa: std.mem.Allocator, io: std.Io) void {
     validateApp(App);
 
     if (is_wasm) {
         const Exports = struct {
             export fn onInit() void {
-                App.onInit(wasm_io);
+                App.onInit(std.heap.wasm_allocator, wasm_io);
             }
             export fn onResize(w: c_uint, h: c_uint, s: f32) void {
                 App.onResize(w, h, s);
@@ -629,6 +630,6 @@ pub fn run(comptime App: type, io: std.Io) void {
         };
         _ = Exports;
     } else {
-        sdl.run(App, io);
+        sdl.run(App, gpa, io);
     }
 }

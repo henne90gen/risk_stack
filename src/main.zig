@@ -165,6 +165,8 @@ const FlipThreeStackEntry = struct {
 const AppState = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
+    /// Scratch memory for a single frame, reset at the start of every frame.
+    frame_arena: std.heap.ArenaAllocator,
     aspect_ratio: f32 = 1.0,
     gl: OpenGLState = .{},
     zoom: ZoomState = .{},
@@ -172,7 +174,7 @@ const AppState = struct {
     font: text.Font = .{},
     cards: CardTextures = .{},
 
-    prng: std.Random,
+    prng: std.Random.DefaultPrng,
     simulation: f.GameSimulation = undefined,
     flip_three_stack: std.ArrayList(FlipThreeStackEntry),
     should_run_next_step: bool = false,
@@ -182,15 +184,23 @@ const AppState = struct {
         var buf = [_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 };
         io.random(&buf);
         const seed: u64 = @bitCast(buf);
-        var r = std.Random.DefaultPrng.init(seed);
-        const prng = r.random();
         return AppState{
             .allocator = allocator,
             .io = io,
+            .frame_arena = .init(allocator),
             .animation = try AnimationState.init(allocator),
-            .prng = prng,
+            .prng = .init(seed),
             .flip_three_stack = try std.ArrayList(FlipThreeStackEntry).initCapacity(allocator, 3),
         };
+    }
+
+    pub fn deinit(self: *AppState) void {
+        self.simulation.deinit();
+        self.font.deinit(self.allocator);
+        self.cards.freePixels(self.allocator);
+        self.flip_three_stack.deinit(self.allocator);
+        self.animation.queue.deinit(self.allocator);
+        self.frame_arena.deinit();
     }
 
     pub fn resetInputTracking(self: *AppState) void {
@@ -201,9 +211,9 @@ const AppState = struct {
 var app_state: AppState = undefined;
 
 pub const RiskStackApp = struct {
-    pub fn onInit(io: std.Io) void {
-        app_state = AppState.init(std.heap.page_allocator, io) catch @panic("failed to initialize app state");
-        app_state.simulation = f.GameSimulation.init(app_state.allocator, app_state.prng, &[_]f.DrawStrategy{
+    pub fn onInit(gpa: std.mem.Allocator, io: std.Io) void {
+        app_state = AppState.init(gpa, io) catch @panic("failed to initialize app state");
+        app_state.simulation = f.GameSimulation.init(app_state.allocator, app_state.prng.random(), &[_]f.DrawStrategy{
             f.DrawStrategy{ .MinPoints = 20 },
             f.DrawStrategy{ .MinPoints = 30 },
             f.DrawStrategy{ .MinPoints = 40 },
@@ -306,9 +316,10 @@ pub const RiskStackApp = struct {
             0,
             p.GL_RGBA,
             p.GL_UNSIGNED_BYTE,
-            app_state.cards.texture_buffer.ptr,
-            app_state.cards.texture_buffer.len,
+            app_state.cards.pixels.?.bytes().ptr,
+            app_state.cards.pixels.?.bytes().len,
         );
+        app_state.cards.freePixels(app_state.allocator);
 
         p.glTexParameteri(p.GL_TEXTURE_2D, p.GL_TEXTURE_MIN_FILTER, @intCast(p.GL_LINEAR_MIPMAP_LINEAR));
         p.glTexParameteri(p.GL_TEXTURE_2D, p.GL_TEXTURE_MAG_FILTER, @intCast(p.GL_LINEAR));
@@ -318,7 +329,6 @@ pub const RiskStackApp = struct {
 
         p.glBindTexture(p.GL_TEXTURE_2D, 0);
 
-        // Bind sampler uniform to texture unit 0, and cache uniform locations
         p.glUseProgram(app_state.gl.tri_program);
 
         app_state.gl.u_loc_card_texture = p.glGetUniformLocation(app_state.gl.tri_program, "uCardTexture");
@@ -361,6 +371,10 @@ pub const RiskStackApp = struct {
 
         p.glEnable(p.GL_BLEND);
         p.glBlendFunc(p.GL_SRC_ALPHA, p.GL_ONE_MINUS_SRC_ALPHA);
+    }
+
+    pub fn onDeinit() void {
+        app_state.deinit();
     }
 
     pub fn onResize(w: c_uint, h: c_uint, scale: f32) void {
@@ -492,9 +506,8 @@ pub const RiskStackApp = struct {
     }
 
     fn render() !void {
-        var frame_arena = std.heap.ArenaAllocator.init(app_state.allocator);
-        defer _ = frame_arena.reset(.retain_capacity);
-        const frame_allocator = frame_arena.allocator();
+        _ = app_state.frame_arena.reset(.retain_capacity);
+        const frame_allocator = app_state.frame_arena.allocator();
 
         p.glClearColor(0.1, 0.1, 0.1, 1.0);
         p.glClear(p.GL_COLOR_BUFFER_BIT);
@@ -872,8 +885,14 @@ const CardAtlasEntry = struct {
 const CardTextures = struct {
     buffer_width: usize = 0,
     buffer_height: usize = 0,
-    texture_buffer: []u8 = undefined,
+    /// Rendered atlas, only kept until it is uploaded to the GPU.
+    pixels: ?card_art.Atlas = null,
     card_atlas: [atlas_cards.len]CardAtlasEntry = [_]CardAtlasEntry{.{}} ** atlas_cards.len,
+
+    fn freePixels(self: *CardTextures, allocator: std.mem.Allocator) void {
+        if (self.pixels) |*pixels| pixels.deinit(allocator);
+        self.pixels = null;
+    }
 };
 
 fn renderCardTextures(io: std.Io, allocator: std.mem.Allocator, faces: []const card_art.Card, cards_per_row: usize, max_width: usize, max_height: usize) !CardTextures {
@@ -883,7 +902,7 @@ fn renderCardTextures(io: std.Io, allocator: std.mem.Allocator, faces: []const c
     var result = CardTextures{
         .buffer_width = atlas.width,
         .buffer_height = atlas.height,
-        .texture_buffer = atlas.bytes(),
+        .pixels = atlas,
     };
 
     const buffer_width_f: f32 = @floatFromInt(atlas.width);
