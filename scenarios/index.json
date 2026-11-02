@@ -1,0 +1,29 @@
+{
+  "scenarios": [
+    {
+      "name": "Freeze as a player's first card",
+      "file": "freeze_first_card.json",
+      "steps": 1
+    },
+    {
+      "name": "FlipThree deals three cards to its target",
+      "file": "flip_three_target.json",
+      "steps": 1
+    },
+    {
+      "name": "Second Chance used during a FlipThree",
+      "file": "second_chance_in_flip_three.json",
+      "steps": 1
+    },
+    {
+      "name": "Duplicate card eliminates the player",
+      "file": "bust.json",
+      "steps": 1
+    },
+    {
+      "name": "FlipThree draws a Freeze for its target",
+      "file": "flip_three_draws_freeze.json",
+      "steps": 1
+    }
+  ]
+}

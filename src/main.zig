@@ -186,11 +186,16 @@ const AppState = struct {
     prng: std.Random.DefaultPrng,
     simulation: f.GameSimulation = undefined,
     flip_three_stack: std.ArrayList(FlipThreeStackEntry),
+    shown_hands: std.ArrayList(std.ArrayList(f.Card)) = .empty,
     should_run_next_step: bool = false,
     /// Steps still to run on their own, from `--steps`.
     auto_steps: u32 = 0,
     /// Set by `--steps`: close once the steps and their animations are done.
     close_after_auto_steps: bool = false,
+    /// Set by `--scenarios`: plays the listed scenarios one after the other.
+    scenario_runner: ?ScenarioRunner = null,
+    /// Scenarios from `--scenarios` that failed to load.
+    failed_scenarios: u32 = 0,
     /// Where S saves and L loads the simulation state; a file on native, a
     /// localStorage entry in the browser. Set with `--scenario`.
     scenario_path: []const u8 = "scenario.json",
@@ -212,9 +217,12 @@ const AppState = struct {
 
     pub fn deinit(self: *AppState) void {
         if (self.card_loader) |*loader| loader.deinit();
+        if (self.scenario_runner) |*runner| runner.deinit(self.allocator);
         self.simulation.deinit();
         self.font.deinit(self.allocator);
         self.flip_three_stack.deinit(self.allocator);
+        for (self.shown_hands.items) |*hand| hand.deinit(self.allocator);
+        self.shown_hands.deinit(self.allocator);
         self.animation.queue.deinit(self.allocator);
         self.frame_arena.deinit();
     }
@@ -238,6 +246,7 @@ pub const RiskStackApp = struct {
         app_state.simulation.settings.logging_enabled = true;
         app_state.simulation.settings.events_enabled = true;
 
+        syncShownHands() catch @panic("failed to set up the shown hands");
         if (options.scenario) |path| {
             app_state.scenario_path = path;
             loadScenario() catch |err| {
@@ -247,6 +256,14 @@ pub const RiskStackApp = struct {
         }
         app_state.auto_steps = options.steps;
         app_state.close_after_auto_steps = options.steps > 0;
+
+        if (options.scenarios) |manifest_path| {
+            app_state.scenario_runner = ScenarioRunner.init(app_state.allocator, app_state.io, manifest_path) catch |err| {
+                p.logErr("loading scenario manifest '{s}' failed: {}", .{ manifest_path, err });
+                if (!p.is_wasm) std.process.exit(1);
+                unreachable;
+            };
+        }
 
         const vert = glInitShader(vert_src, vert_src.len, p.GL_VERTEX_SHADER) catch std.debug.panic("vertex shader compilation failed", .{});
         const frag = glInitShader(frag_src, frag_src.len, p.GL_FRAGMENT_SHADER) catch std.debug.panic("fragment shader compilation failed", .{});
@@ -445,16 +462,22 @@ pub const RiskStackApp = struct {
                 return;
             }
         }
+
         update() catch |err| p.logErr("update failed: {}", .{err});
         render() catch |err| p.logErr("render failed: {}", .{err});
     }
 
     fn update() !void {
+        if (app_state.animation.queue.items.len == 0) try syncShownHands();
+
         for (app_state.animation.queue.items) |*animation| {
             switch (animation.*) {
                 .deal_card => |*data| {
                     data.t += 0.05;
                     if (data.t >= 1.0) {
+                        if (data.card != .Freeze and data.card != .FlipThree) {
+                            try app_state.shown_hands.items[playerIndex(data.player)].append(app_state.allocator, data.card);
+                        }
                         _ = app_state.animation.queue.orderedRemove(0);
                     }
                 },
@@ -481,7 +504,23 @@ pub const RiskStackApp = struct {
             return;
         }
 
-        // All animations are done here; the last step has been shown.
+        if (app_state.scenario_runner) |*runner| {
+            if (app_state.auto_steps == 0) {
+                switch (runner.advance(std.Io.Clock.awake.now(app_state.io))) {
+                    .wait => {},
+                    .play => |scenario| playScenario(scenario),
+                    .finished => {
+                        if (app_state.failed_scenarios > 0) {
+                            p.logErr("{d} of {d} scenarios failed to load", .{ app_state.failed_scenarios, runner.scenarios.len });
+                        } else {
+                            p.logInfo("played all {d} scenarios, closing", .{runner.scenarios.len});
+                        }
+                        p.close();
+                    },
+                }
+                return;
+            }
+        }
         if (app_state.close_after_auto_steps and app_state.auto_steps == 0) {
             p.logInfo("ran the requested --steps, closing", .{});
             app_state.close_after_auto_steps = false;
@@ -672,6 +711,11 @@ pub const RiskStackApp = struct {
             }
         }.call;
 
+        if (app_state.scenario_runner) |*runner| if (runner.label()) |position| {
+            const label = try std.fmt.allocPrint(frame_allocator, "{d}/{d} {s}", .{ position.number, position.total, position.name });
+            try addText(frame_allocator, &instances, label, .{ .x = -half_w + 0.03 / app_state.zoom.current, .y = half_h - 0.07 / app_state.zoom.current, .scale = 0.05 / app_state.zoom.current });
+        };
+
         // Deck: single face-down card at the center.
         try addCard(frame_allocator, &instances, &app_state.cards, back_texture_index, 0.0, 0.0, std.math.pi, card_w, card_h);
 
@@ -720,59 +764,43 @@ pub const RiskStackApp = struct {
                 .scale = font_scale,
             });
 
-            // No early exit for an empty hand: the Freeze/FlipThree cards below
-            // must still be drawn, e.g. when Freeze is a player's first card.
-            const n = player.hand.items.len;
+            const shown = app_state.shown_hands.items[pi].items;
 
-            // Count how many deal_card animations are pending in the queue for this player
-            // (excluding special cards). The first matching animation is active; the rest
-            // are waiting and their cards should not be rendered yet.
-            var pending_deal_count: usize = 0;
-            var active_deal_anim: ?Animation = null;
-            for (app_state.animation.queue.items) |animation| {
-                switch (animation) {
-                    .deal_card => |data| {
-                        if (data.card == .Freeze or data.card == .FlipThree) continue;
-                        if (data.player != player) continue;
-                        if (active_deal_anim == null) {
-                            active_deal_anim = animation;
-                        } else {
-                            pending_deal_count += 1;
-                        }
-                    },
-                    else => {},
-                }
-            }
-
-            // Cards at the tail of the hand that are still waiting in the animation
-            // queue should not be rendered until their animation becomes active.
-            const visible_card_count = n - pending_deal_count;
+            // The card being dealt to this player right now, if any. It flies
+            // into the slot after the shown cards.
+            var incoming: ?struct { card: f.Card, t: f32 } = null;
+            if (app_state.animation.queue.items.len > 0) switch (app_state.animation.queue.items[0]) {
+                .deal_card => |data| {
+                    if (data.player == player and data.card != .Freeze and data.card != .FlipThree) {
+                        incoming = .{ .card = data.card, .t = data.t };
+                    }
+                },
+                else => {},
+            };
+            const n = shown.len + @intFromBool(incoming != null);
 
             const tapped_spacing: f32 = card_h * 1.1;
             const effective_spacing: f32 = if (player.state == .Eliminated) tapped_spacing else card_spacing;
             const total_width: f32 = @as(f32, @floatFromInt(n -| 1)) * effective_spacing;
-            for (player.hand.items, 0..) |card, ci| {
-                // Skip cards that are still waiting in the animation queue.
-                if (ci >= visible_card_count) continue;
+            for (0..n) |ci| {
+                const card = if (ci < shown.len) shown[ci] else incoming.?.card;
 
                 var local_card_angle = card_angle;
                 const offset: f32 = -total_width / 2.0 + @as(f32, @floatFromInt(ci)) * effective_spacing;
                 var cx = px + perp_x * offset;
                 var cy = py + perp_y * offset;
 
-                if (active_deal_anim) |anim| {
-                    const data = anim.deal_card;
-                    if (ci == visible_card_count - 1) {
-                        const result_pos = zm.lerp(zm.f32x4(0.0, 0.0, 0.0, 0.0), zm.f32x4(cx, cy, 0.0, 0.0), data.t);
-                        cx = result_pos[0];
-                        cy = result_pos[1];
+                if (ci == shown.len) {
+                    const t_deal = incoming.?.t;
+                    const result_pos = zm.lerp(zm.f32x4(0.0, 0.0, 0.0, 0.0), zm.f32x4(cx, cy, 0.0, 0.0), t_deal);
+                    cx = result_pos[0];
+                    cy = result_pos[1];
 
-                        var start_angle: f32 = 0.0;
-                        if (local_card_angle > std.math.pi) {
-                            start_angle = std.math.pi * 2.0;
-                        }
-                        local_card_angle = std.math.lerp(start_angle, local_card_angle, data.t);
+                    var start_angle: f32 = 0.0;
+                    if (local_card_angle > std.math.pi) {
+                        start_angle = std.math.pi * 2.0;
                     }
+                    local_card_angle = std.math.lerp(start_angle, local_card_angle, t_deal);
                 }
 
                 if (player.state == .RoundEnded and ci == 0) {
@@ -926,6 +954,18 @@ pub const RiskStackApp = struct {
         p.logInfo("saved scenario to {s}", .{app_state.scenario_path});
     }
 
+    fn playScenario(scenario: ScenarioRunner.Scenario) void {
+        p.logInfo("scenario: {s}", .{scenario.name});
+        app_state.scenario_path = scenario.path;
+        loadScenario() catch |err| {
+            p.logErr("scenario '{s}': loading '{s}' failed: {}", .{ scenario.name, scenario.path, err });
+            app_state.failed_scenarios += 1;
+            app_state.auto_steps = 0;
+            return;
+        };
+        app_state.auto_steps = scenario.steps;
+    }
+
     fn loadScenario() !void {
         const s = try p.readStorage(app_state.io, app_state.allocator, app_state.scenario_path);
         defer app_state.allocator.free(s);
@@ -934,12 +974,164 @@ pub const RiskStackApp = struct {
         // Pending animations point at the replaced players.
         app_state.animation.queue.clearRetainingCapacity();
         app_state.flip_three_stack.clearRetainingCapacity();
+        try syncShownHands();
         app_state.next_event_to_process_index = 0;
         // A click or Space from before the load must not advance the new state.
         app_state.should_run_next_step = false;
         p.logInfo("loaded scenario from {s}", .{app_state.scenario_path});
     }
 };
+
+/// Steps through the scenarios of a manifest. It only decides what comes
+/// next; the app loads and runs each scenario it hands out. The manifest is
+/// JSON:
+///
+///     {"scenarios": [{"name": "...", "file": "freeze.json", "steps": 2}]}
+///
+/// `file` is relative to the manifest.
+const ScenarioRunner = struct {
+    const Manifest = struct {
+        scenarios: []const struct {
+            name: []const u8,
+            file: []const u8,
+            steps: u32,
+        },
+    };
+
+    pub const Scenario = struct {
+        name: []const u8,
+        path: []const u8,
+        steps: u32,
+
+        fn deinit(self: *Scenario, allocator: std.mem.Allocator) void {
+            allocator.free(self.name);
+            allocator.free(self.path);
+        }
+    };
+
+    pub const ScenarioLabel = struct {
+        name: []const u8,
+        number: usize,
+        total: usize,
+    };
+
+    pub const Action = union(enum) {
+        /// Keep showing the current result.
+        wait,
+        /// Load and run this scenario.
+        play: Scenario,
+        /// All scenarios have been played.
+        finished,
+    };
+
+    const wait_time = std.Io.Duration.fromMilliseconds(1500);
+
+    scenarios: []Scenario,
+    index: ?usize = null,
+    done_at: ?std.Io.Timestamp = null,
+
+    fn init(allocator: std.mem.Allocator, io: std.Io, manifest_path: []const u8) !ScenarioRunner {
+        const json = try p.readStorage(io, allocator, manifest_path);
+        defer allocator.free(json);
+        const manifest = try std.json.parseFromSlice(Manifest, allocator, json, .{});
+        defer manifest.deinit();
+        if (manifest.value.scenarios.len == 0) return error.EmptyManifest;
+
+        const dir = std.fs.path.dirname(manifest_path) orelse ".";
+        const scenarios = try allocator.alloc(Scenario, manifest.value.scenarios.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (scenarios[0..initialized]) |*scenario| scenario.deinit(allocator);
+            allocator.free(scenarios);
+        }
+        for (scenarios, manifest.value.scenarios) |*scenario, entry| {
+            const name = try allocator.dupe(u8, entry.name);
+            errdefer allocator.free(name);
+            scenario.* = .{
+                .name = name,
+                .path = try std.fs.path.join(allocator, &.{ dir, entry.file }),
+                .steps = entry.steps,
+            };
+            initialized += 1;
+        }
+        return .{ .scenarios = scenarios };
+    }
+
+    fn deinit(self: *ScenarioRunner, allocator: std.mem.Allocator) void {
+        for (self.scenarios) |*scenario| scenario.deinit(allocator);
+        allocator.free(self.scenarios);
+    }
+
+    fn advance(self: *ScenarioRunner, now: std.Io.Timestamp) Action {
+        const index = self.index orelse {
+            self.index = 0;
+            return .{ .play = self.scenarios[0] };
+        };
+        const done_at = self.done_at orelse {
+            self.done_at = now;
+            return .wait;
+        };
+        if (done_at.durationTo(now).nanoseconds < wait_time.nanoseconds) return .wait;
+        self.done_at = null;
+
+        if (index + 1 == self.scenarios.len) return .finished;
+        self.index = index + 1;
+        return .{ .play = self.scenarios[index + 1] };
+    }
+
+    fn label(self: *const ScenarioRunner) ?ScenarioLabel {
+        const index = self.index orelse return null;
+        return .{ .number = index + 1, .total = self.scenarios.len, .name = self.scenarios[index].name };
+    }
+};
+
+test "ScenarioRunner.advance holds each scenario, then plays the next" {
+    var scenarios = [_]ScenarioRunner.Scenario{
+        .{ .name = "a", .path = "a.json", .steps = 1 },
+        .{ .name = "b", .path = "b.json", .steps = 2 },
+    };
+    var runner = ScenarioRunner{ .scenarios = &scenarios };
+    const at = std.Io.Timestamp.fromNanoseconds;
+    const ms = std.time.ns_per_ms;
+
+    try t.expectEqual(null, runner.label());
+    // The first scenario starts right away, without a hold.
+    try t.expectEqualStrings("a.json", runner.advance(at(0)).play.path);
+    try t.expectEqual(@as(usize, 1), runner.label().?.number);
+
+    try t.expect(runner.advance(at(0)) == .wait);
+    try t.expect(runner.advance(at(1000 * ms)) == .wait);
+    const next = runner.advance(at(1500 * ms));
+    try t.expectEqualStrings("b.json", next.play.path);
+    try t.expectEqual(@as(u32, 2), next.play.steps);
+    try t.expectEqual(@as(usize, 2), runner.label().?.number);
+
+    try t.expect(runner.advance(at(2000 * ms)) == .wait);
+    try t.expect(runner.advance(at(3500 * ms)) == .finished);
+}
+
+/// Index of `player` in `simulation.players`.
+fn playerIndex(player: *const f.Player) usize {
+    for (app_state.simulation.players, 0..) |*pl, i| {
+        if (pl == player) return i;
+    }
+    unreachable;
+}
+
+/// Makes every shown hand match the player's real hand.
+fn syncShownHands() !void {
+    const players = app_state.simulation.players;
+    const hands = &app_state.shown_hands;
+    while (hands.items.len > players.len) {
+        var hand = hands.pop().?;
+        hand.deinit(app_state.allocator);
+    }
+    while (hands.items.len < players.len) try hands.append(app_state.allocator, .empty);
+    for (hands.items, players) |*shown, player| {
+        shown.clearRetainingCapacity();
+        try shown.appendSlice(app_state.allocator, player.hand.items);
+    }
+}
 
 /// Where a player sits at the table, matching the layout in `render`.
 const Seat = struct {

@@ -583,6 +583,9 @@ pub const Options = struct {
     scenario: ?[]const u8 = null,
     /// Steps to run on their own after startup.
     steps: u32 = 0,
+    /// Manifest listing scenarios to play one after the other (see
+    /// `scenarios/index.json`). Excludes `scenario` and `steps`.
+    scenarios: ?[]const u8 = null,
 };
 
 const usage_text =
@@ -594,6 +597,9 @@ const usage_text =
     \\  --steps <n>        Run n steps on their own, as if Space was pressed,
     \\                     and close once the last one has been shown (or
     \\                     the game has ended).
+    \\  --scenarios <file> Play every scenario listed in the manifest <file>
+    \\                     one after the other, then close. Can't be
+    \\                     combined with --scenario or --steps.
     \\  --help             Show this help.
 ;
 
@@ -613,6 +619,10 @@ fn parseOptions(args: []const [:0]const u8) !ParsedArgs {
             i += 1;
             if (i >= args.len) return error.MissingScenarioPath;
             options.scenario = args[i];
+        } else if (std.mem.eql(u8, arg, "--scenarios")) {
+            i += 1;
+            if (i >= args.len) return error.MissingManifestPath;
+            options.scenarios = args[i];
         } else if (std.mem.eql(u8, arg, "--steps")) {
             i += 1;
             if (i >= args.len) return error.MissingStepCount;
@@ -621,6 +631,9 @@ fn parseOptions(args: []const [:0]const u8) !ParsedArgs {
             logErr("unknown argument '{s}'", .{arg});
             return error.UnknownArgument;
         }
+    }
+    if (options.scenarios != null and (options.scenario != null or options.steps != 0)) {
+        return error.ConflictingOptions;
     }
     return .{ .run = options };
 }
@@ -639,6 +652,12 @@ test "parseOptions" {
     try t.expectError(error.MissingStepCount, parseOptions(&.{ "risk_stack", "--steps" }));
     try t.expectError(error.InvalidStepCount, parseOptions(&.{ "risk_stack", "--steps", "-1" }));
     try t.expectError(error.MissingScenarioPath, parseOptions(&.{ "risk_stack", "--scenario" }));
+
+    const harness = (try parseOptions(&.{ "risk_stack", "--scenarios", "scenarios/index.json" })).run;
+    try t.expectEqualStrings("scenarios/index.json", harness.scenarios.?);
+    try t.expectError(error.MissingManifestPath, parseOptions(&.{ "risk_stack", "--scenarios" }));
+    try t.expectError(error.ConflictingOptions, parseOptions(&.{ "risk_stack", "--scenarios", "a.json", "--steps", "2" }));
+    try t.expectError(error.ConflictingOptions, parseOptions(&.{ "risk_stack", "--scenario", "b.json", "--scenarios", "a.json" }));
 }
 
 /// Parses the command line, handling `--help` and invalid arguments by

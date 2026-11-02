@@ -1,0 +1,65 @@
+{
+  "deck": [
+    "Eight",
+    "Three",
+    "Ten",
+    "Two",
+    "Twelve",
+    "Six",
+    "Nine",
+    "Seven",
+    "Eleven",
+    "Four",
+    "Eight",
+    "Three",
+    "Ten",
+    "Two",
+    "Twelve",
+    "Six",
+    "Nine",
+    "Seven",
+    "Eleven",
+    "Four",
+    "Eight",
+    "Three",
+    "Ten",
+    "Two",
+    "Twelve",
+    "Six",
+    "Nine",
+    "Seven",
+    "Eleven",
+    "Four",
+    "Freeze"
+  ],
+  "discarded": [],
+  "players": [
+    {
+      "hand": [],
+      "score": 0,
+      "state": "InGame",
+      "strategy": {
+        "MinPoints": 40
+      }
+    },
+    {
+      "hand": [],
+      "score": 0,
+      "state": "InGame",
+      "strategy": {
+        "MinPoints": 40
+      }
+    },
+    {
+      "hand": [],
+      "score": 0,
+      "state": "InGame",
+      "strategy": {
+        "MinPoints": 40
+      }
+    }
+  ],
+  "current_player_index": 0,
+  "cards_played": 0,
+  "seed": 1
+}

@@ -85,6 +85,17 @@ pub fn build(b: *std.Build) void {
         const run_step = b.step("run", "Run the app");
         run_step.dependOn(&run_cmd.step);
 
+        // Plays every scenario in scenarios/index.json in one window, for a
+        // visual check. Needs a display, so it's a separate step that neither
+        // `test` nor CI runs.
+        const scenarios_cmd = b.addRunArtifact(exe);
+        scenarios_cmd.addArg("--scenarios");
+        scenarios_cmd.addFileArg(b.path("scenarios/index.json"));
+        // Rerun every time; the result is on screen, not in a file.
+        scenarios_cmd.has_side_effects = true;
+        const scenarios_step = b.step("scenarios", "Play all scenarios in scenarios/index.json (needs a display, not for CI)");
+        scenarios_step.dependOn(&scenarios_cmd.step);
+
         const exe_tests = b.addTest(.{ .root_module = exe_mod });
         const run_tests = b.addRunArtifact(exe_tests);
         test_step.dependOn(&run_tests.step);
