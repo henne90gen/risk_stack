@@ -3,6 +3,7 @@ const std = @import("std");
 const t = std.testing;
 
 pub const is_wasm = builtin.target.cpu.arch == .wasm32;
+const channel = @import("channel.zig");
 const sdl = if (!is_wasm) @import("platform_sdl.zig") else void;
 
 test {
@@ -12,10 +13,6 @@ test {
 // ---------------------------------------------------------------------------
 // Key constants
 // ---------------------------------------------------------------------------
-
-// Platform-neutral key constants.
-// Values match JS KeyboardEvent.keyCode so the wasm host can pass raw JS
-// keycodes straight through to Zig without any translation layer.
 
 pub const Key = enum(u8) {
     Backspace = 8,
@@ -531,6 +528,16 @@ pub fn logWarn(comptime fmt: []const u8, args: anytype) void {
     }
 }
 
+pub fn logErr(comptime fmt: []const u8, args: anytype) void {
+    if (is_wasm) {
+        var buf: [512]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, fmt, args) catch buf[0..];
+        wasm.logErr(msg.ptr, msg.len);
+    } else {
+        std.log.err(fmt, args);
+    }
+}
+
 /// Persists `data` under `name`: a file in the working directory on native,
 /// a `localStorage` entry on wasm.
 pub fn writeStorage(io: std.Io, name: []const u8, data: []const u8) !void {
@@ -554,21 +561,21 @@ pub fn readStorage(io: std.Io, allocator: std.mem.Allocator, name: []const u8) !
     }
 }
 
-pub fn logErr(comptime fmt: []const u8, args: anytype) void {
-    if (is_wasm) {
-        var buf: [512]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, fmt, args) catch buf[0..];
-        wasm.logErr(msg.ptr, msg.len);
-    } else {
-        std.log.err(fmt, args);
-    }
-}
-
 pub fn close() void {
     if (is_wasm) {
         // TODO maybe reload the page?
     } else {
         sdl.close();
+    }
+}
+
+/// Queues `function(data...)` to run on the main thread during its next frame.
+/// Thread-safe: meant to be called from async work to hand back its result.
+pub fn asyncPostResult(comptime function: anytype, data: std.meta.ArgsTuple(@TypeOf(function))) !void {
+    if (is_wasm) {
+        try wasm_channel.post(function, data);
+    } else {
+        try sdl.asyncPostResult(function, data);
     }
 }
 
@@ -677,10 +684,10 @@ pub fn parseArgs(args: []const [:0]const u8) Options {
 }
 
 fn validateApp(comptime App: type) void {
-    const required = .{
+    const required_functions = .{
         .{ "onInit", fn (std.mem.Allocator, std.Io, Options) void },
         .{ "onDeinit", fn () void },
-        .{ "onResize", fn (c_uint, c_uint, f32) void },
+        .{ "onResize", fn (u32, u32, f32) void },
         .{ "onKeyDown", fn (Key) void },
         .{ "onKeyUp", fn (Key) void },
         .{ "onMouseDown", fn (MouseButton, f32, f32) void },
@@ -689,17 +696,17 @@ fn validateApp(comptime App: type) void {
         .{ "onMouseWheel", fn (f32) void },
         .{ "onAnimationFrame", fn () void },
     };
-    inline for (required) |entry| {
-        const name = entry[0];
-        const Sig = entry[1];
-        if (!@hasDecl(App, name)) {
-            @compileError("App must declare `pub fn " ++ name ++ "`");
+    inline for (required_functions) |required_function| {
+        const function_name = required_function[0];
+        const function_signature = required_function[1];
+        if (!@hasDecl(App, function_name)) {
+            @compileError("App must declare `pub fn " ++ function_name ++ "`");
         }
 
-        const actual = @TypeOf(@field(App, name));
-        if (actual != Sig) {
-            @compileError("App." ++ name ++ " has wrong signature: expected " ++
-                @typeName(Sig) ++ ", got " ++ @typeName(actual));
+        const actual = @TypeOf(@field(App, function_name));
+        if (actual != function_signature) {
+            @compileError("App." ++ function_name ++ " has wrong signature: expected " ++
+                @typeName(function_signature) ++ ", got " ++ @typeName(actual));
         }
     }
 }
@@ -708,6 +715,11 @@ const wasm_io: std.Io = if (is_wasm and @hasDecl(@import("root"), "wasm_io"))
     @import("root").wasm_io
 else
     std.Io.failing;
+
+/// The root file provides an allocator that is safe to use from the worker
+/// threads, see `wasm_threads.zig`.
+const wasm_gpa: std.mem.Allocator = if (is_wasm) @import("root").wasm_allocator else undefined;
+var wasm_channel: channel.Channel = undefined;
 
 fn jsKey(key_code: u32) ?Key {
     return std.enums.fromInt(Key, key_code);
@@ -733,9 +745,10 @@ pub fn run(comptime App: type, gpa: std.mem.Allocator, io: std.Io, options: Opti
     if (is_wasm) {
         const Exports = struct {
             export fn onInit() void {
-                App.onInit(std.heap.wasm_allocator, wasm_io, .{});
+                wasm_channel = .init(wasm_gpa);
+                App.onInit(wasm_gpa, wasm_io, .{});
             }
-            export fn onResize(w: c_uint, h: c_uint, s: f32) void {
+            export fn onResize(w: u32, h: u32, s: f32) void {
                 App.onResize(w, h, s);
             }
             export fn onKeyDown(key_code: u32) void {
@@ -761,6 +774,7 @@ pub fn run(comptime App: type, gpa: std.mem.Allocator, io: std.Io, options: Opti
                 App.onMouseWheel(delta);
             }
             export fn onAnimationFrame() void {
+                wasm_channel.drain();
                 App.onAnimationFrame();
             }
         };

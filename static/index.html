@@ -4,6 +4,10 @@
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
         <title>Risk Stack</title>
+        <!-- Adds the COOP/COEP headers that SharedArrayBuffer needs when the host
+             doesn't send them; reloads the page once on the first visit. Must
+             come first. -->
+        <script src="coi-serviceworker.js"></script>
         <style>
             * {
                 margin: 0;
@@ -37,16 +41,54 @@
                 // Memory helpers (Wasm <-> JS string / buffer access)
                 // -------------------------------------------------------------------------
 
+                // Web APIs (TextDecoder, crypto, WebGL) reject views on shared
+                // memory, so anything handed to them is copied out with slice().
                 function getString(ptr, len) {
                     const array = new Uint8Array(wasmMemory.buffer, ptr, len);
                     const decoder = new TextDecoder();
-                    return decoder.decode(array);
+                    return decoder.decode(array.slice());
                 }
+
+                if (!crossOriginIsolated) {
+                    // The service worker reloads the page once it is active, so
+                    // this only sticks if that can't happen (no HTTPS, private mode).
+                    document.body.textContent =
+                        "This page needs SharedArrayBuffer: serve it over HTTPS (or localhost) " +
+                        "with service workers enabled, or send the headers " +
+                        "Cross-Origin-Opener-Policy: same-origin and " +
+                        "Cross-Origin-Embedder-Policy: require-corp.";
+                    return;
+                }
+
+                // Workers share this memory with the main thread. The sizes must
+                // match initial_memory/max_memory in build.zig (in 64 KiB pages).
+                wasmMemory = new WebAssembly.Memory({
+                    initial: 1024,
+                    maximum: 16384,
+                    shared: true,
+                });
+                let wasmModule = null; // set once compiled, before any worker starts
 
                 const canvas = document.getElementById("canvas");
                 const webgl = initWebGL(canvas, getString);
 
                 const env = {
+                    memory: wasmMemory,
+
+                    // Backing for the worker pool (see src/wasm_threads.zig).
+                    hardwareConcurrency() {
+                        return navigator.hardwareConcurrency || 2;
+                    },
+                    spawnWorker(stackTop) {
+                        const worker = new Worker("worker.js");
+                        worker.onerror = (e) => console.error("worker failed:", e.message);
+                        worker.postMessage({
+                            module: wasmModule,
+                            memory: wasmMemory,
+                            stackTop,
+                        });
+                    },
+
                     logInfo(ptr, len) {
                         console.log(getString(ptr, len));
                     },
@@ -90,9 +132,9 @@
                         return performance.now();
                     },
                     getRandomValues(ptr, len) {
-                        crypto.getRandomValues(
-                            new Uint8Array(wasmMemory.buffer, ptr, len),
-                        );
+                        const bytes = new Uint8Array(len);
+                        crypto.getRandomValues(bytes);
+                        new Uint8Array(wasmMemory.buffer, ptr, len).set(bytes);
                     },
 
                     ...webgl,
@@ -106,11 +148,9 @@
                 const response = await fetch("risk_stack.wasm", {
                     cache: "no-store",
                 });
-                const { instance } = await WebAssembly.instantiateStreaming(
-                    response,
-                    { env },
-                );
-                wasmMemory = instance.exports.memory;
+                const { instance, module } =
+                    await WebAssembly.instantiateStreaming(response, { env });
+                wasmModule = module;
 
                 const {
                     onInit,

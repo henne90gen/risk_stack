@@ -106,13 +106,16 @@ pub fn build(b: *std.Build) void {
         const wasm_target = b.resolveTargetQuery(.{
             .cpu_arch = .wasm32,
             .os_tag = .freestanding,
-            .cpu_features_add = std.Target.wasm.featureSet(&.{.exception_handling}),
+            .cpu_features_add = std.Target.wasm.featureSet(&.{ .exception_handling, .atomics, .bulk_memory }),
         });
 
         const wasm_mod = b.createModule(.{
             .root_source_file = b.path("src/main_wasm.zig"),
             .target = wasm_target,
             .optimize = optimize,
+            // std's wasm allocator only exists for single-threaded builds, so
+            // std does no locking here; src/wasm_threads.zig does it instead.
+            .single_threaded = true,
         });
         wasm_mod.addImport("zmath", zmath_dep.module("root"));
         const z2d_wasm_dep = b.dependency("z2d", .{ .target = wasm_target, .optimize = optimize });
@@ -129,6 +132,12 @@ pub fn build(b: *std.Build) void {
         });
         wasm_exe.entry = .disabled;
         wasm_exe.rdynamic = true;
+        // Web workers run the same module on the same memory. The host creates
+        // that memory, so keep the sizes in sync with static/index.html.
+        wasm_exe.shared_memory = true;
+        wasm_exe.import_memory = true;
+        wasm_exe.initial_memory = 64 * 1024 * 1024; // 1024 pages
+        wasm_exe.max_memory = 1024 * 1024 * 1024; // 16384 pages
         const install_wasm = b.addInstallArtifact(wasm_exe, .{});
         const wasm_step = b.step("wasm", "Build WebGL module (wasm32-wasi)");
         wasm_step.dependOn(&install_wasm.step);
@@ -138,6 +147,12 @@ pub fn build(b: *std.Build) void {
 
         const install_js = b.addInstallBinFile(b.path("static/webgl.js"), "webgl.js");
         wasm_step.dependOn(&install_js.step);
+
+        const install_worker = b.addInstallBinFile(b.path("static/worker.js"), "worker.js");
+        wasm_step.dependOn(&install_worker.step);
+
+        const install_coi = b.addInstallBinFile(b.path("static/coi-serviceworker.js"), "coi-serviceworker.js");
+        wasm_step.dependOn(&install_coi.step);
 
         b.getInstallStep().dependOn(wasm_step);
     }

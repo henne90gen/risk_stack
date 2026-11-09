@@ -136,7 +136,7 @@ pub fn main(init: std.process.Init) !void {
             .shared = &shared,
             .prng = std.Random.DefaultPrng.init(@intCast(std.Io.Clock.now(.real, io).toMilliseconds() +% @as(i64, @intCast(i)))),
         };
-        group.async(io, WorkerContext.run, .{&contexts[i]});
+       try group.concurrent(io, WorkerContext.run, .{&contexts[i]});
     }
 
     try group.await(io);

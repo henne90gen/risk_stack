@@ -171,6 +171,7 @@ const FlipThreeStackEntry = struct {
 const AppState = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
+    group: std.Io.Group = .init,
     /// Scratch memory for a single frame, reset at the start of every frame.
     frame_arena: std.heap.ArenaAllocator,
     aspect_ratio: f32 = 1.0,
@@ -179,9 +180,11 @@ const AppState = struct {
     animation: AnimationState,
     font: text.Font = .{},
     cards: CardTextures = .{},
-    /// Renders the card atlas a card per frame; null once the cards are uploaded.
-    card_loader: ?card_art.AtlasRenderer = null,
-    loading_started: std.Io.Timestamp = .zero,
+
+    cards_loading: bool = true,
+    cards_loading_started: std.Io.Timestamp = .zero,
+    cards_loaded: u32 = 0,
+    cards_total: u32 = 0,
 
     prng: std.Random.DefaultPrng,
     simulation: f.GameSimulation = undefined,
@@ -216,7 +219,7 @@ const AppState = struct {
     }
 
     pub fn deinit(self: *AppState) void {
-        if (self.card_loader) |*loader| loader.deinit();
+        self.group.cancel(self.io);
         if (self.scenario_runner) |*runner| runner.deinit(self.allocator);
         self.simulation.deinit();
         self.font.deinit(self.allocator);
@@ -345,8 +348,9 @@ pub const RiskStackApp = struct {
 
         p.glBindVertexArray(0);
 
-        app_state.loading_started = std.Io.Clock.awake.now(io);
-        app_state.card_loader = card_art.AtlasRenderer.init(app_state.allocator, &atlas_cards, 8, 1920, 1080) catch |err| std.debug.panic("failed to start rendering the cards: {}", .{err});
+        app_state.cards_loading_started = std.Io.Clock.awake.now(io);
+        app_state.cards_total = atlas_cards.len;
+        app_state.group.concurrent(app_state.io, asyncRenderCards, .{app_state.allocator}) catch |err| std.debug.panic("asyncRenderCards failed: {}", .{err});
 
         p.glUseProgram(app_state.gl.tri_program);
 
@@ -396,7 +400,7 @@ pub const RiskStackApp = struct {
         app_state.deinit();
     }
 
-    pub fn onResize(w: c_uint, h: c_uint, scale: f32) void {
+    pub fn onResize(w: u32, h: u32, scale: f32) void {
         p.logInfo("resizing to new dimensions {}x{} with scale {}", .{ w, h, scale });
 
         const fw: f32 = @floatFromInt(w);
@@ -455,12 +459,9 @@ pub const RiskStackApp = struct {
     }
 
     pub fn onAnimationFrame() void {
-        if (app_state.card_loader != null) {
-            loadNextCard() catch |err| std.debug.panic("failed to render the cards: {}", .{err});
-            if (app_state.card_loader != null) {
-                renderLoadingScreen() catch |err| p.logErr("render failed: {}", .{err});
-                return;
-            }
+        if (app_state.cards_loading) {
+            renderLoadingScreen() catch |err| p.logErr("render loading screen failed: {}", .{err});
+            return;
         }
 
         update() catch |err| p.logErr("update failed: {}", .{err});
@@ -576,23 +577,6 @@ pub const RiskStackApp = struct {
         }
     }
 
-    /// Renders one more card; uploads the atlas once all cards are done.
-    fn loadNextCard() !void {
-        const loader = &app_state.card_loader.?;
-        if (try loader.step()) return;
-
-        var atlas = loader.finish();
-        defer atlas.deinit(app_state.allocator);
-        loader.deinit();
-        app_state.card_loader = null;
-
-        app_state.cards = cardTexturesFromAtlas(&atlas);
-        uploadCardTextures(&atlas);
-
-        const elapsed = app_state.loading_started.durationTo(std.Io.Clock.awake.now(app_state.io));
-        p.logInfo("rendered all cards into a single texture: {}x{} in {}ms", .{ atlas.width, atlas.height, elapsed.toMilliseconds() });
-    }
-
     fn renderLoadingScreen() !void {
         _ = app_state.frame_arena.reset(.retain_capacity);
         const frame_allocator = app_state.frame_arena.allocator();
@@ -612,10 +596,9 @@ pub const RiskStackApp = struct {
 
         var instances: std.ArrayList(Instance) = try .initCapacity(frame_allocator, 64);
 
-        const loader = &app_state.card_loader.?;
-        const done: f32 = @floatFromInt(loader.done());
-        const total: f32 = @floatFromInt(loader.faces.len);
-        const seconds: f32 = @floatCast(@as(f64, @floatFromInt(app_state.loading_started.untilNow(app_state.io, .awake).toNanoseconds())) / std.time.ns_per_s);
+        const done: f32 = @floatFromInt(app_state.cards_loaded);
+        const total: f32 = @floatFromInt(app_state.cards_total);
+        const seconds: f32 = @floatCast(@as(f64, @floatFromInt(app_state.cards_loading_started.untilNow(app_state.io, .awake).toNanoseconds())) / std.time.ns_per_s);
 
         // Spinner: a ring of dots, the brightest one leading, one turn per second.
         const dot_count = 10;
@@ -626,7 +609,7 @@ pub const RiskStackApp = struct {
             try addQuad(frame_allocator, &instances, 0.12 * @cos(angle), 0.2 + 0.12 * @sin(angle), 0.035, 0.035, angle, zm.f32x4(0.0, 1.0, 1.0, alpha));
         }
 
-        const label = try std.fmt.allocPrint(frame_allocator, "Generating cards {d}/{d}", .{ loader.done(), loader.faces.len });
+        const label = try std.fmt.allocPrint(frame_allocator, "Generating cards {d}/{d}", .{ app_state.cards_loaded, app_state.cards_total });
         const font_scale = 0.06;
         try addText(frame_allocator, &instances, label, .{
             .y = -0.1,
@@ -1329,4 +1312,40 @@ fn addQuad(alloc: std.mem.Allocator, inst: *std.ArrayList(Instance), cx: f32, cy
         .color = color,
         .render_type = 2,
     });
+}
+
+fn asyncRenderCards(allocator: std.mem.Allocator) void {
+    asyncRenderCardsWrapped(allocator) catch |err| {
+        p.logErr("asyncRenderCards failed: {}", .{err});
+    };
+}
+
+fn asyncRenderCardsWrapped(allocator: std.mem.Allocator) !void {
+    var loader = try card_art.AtlasRenderer.init(allocator, &atlas_cards, 8, 1920, 1080);
+    defer loader.deinit();
+
+    while (try loader.step()) {
+        try p.asyncPostResult(asyncRenderCardDone, .{});
+    }
+
+    const atlas = loader.finish();
+    errdefer allocator.free(atlas.buffer);
+    try p.asyncPostResult(asyncRenderCardsDone, .{atlas});
+}
+
+fn asyncRenderCardDone() void {
+    app_state.cards_loaded += 1;
+    p.logInfo("another card is done loading", .{});
+}
+
+fn asyncRenderCardsDone(rendered: card_art.Atlas) void {
+    var atlas = rendered;
+    defer atlas.deinit(app_state.allocator);
+
+    app_state.cards = cardTexturesFromAtlas(&atlas);
+    uploadCardTextures(&atlas);
+    app_state.cards_loading = false;
+
+    const elapsed = app_state.cards_loading_started.durationTo(std.Io.Clock.awake.now(app_state.io));
+    p.logInfo("rendered all cards into a single texture: {}x{} in {}ms", .{ atlas.width, atlas.height, elapsed.toMilliseconds() });
 }

@@ -1,15 +1,21 @@
 const std = @import("std");
 const m = @import("main.zig");
+const threads = @import("wasm_threads.zig");
+
+/// Safe to use from the worker threads as well, unlike `std.heap.wasm_allocator`.
+pub const wasm_allocator = threads.allocator;
 
 comptime {
     if (@import("builtin").target.cpu.arch == .wasm32) {
-        m.p.run(m.RiskStackApp, std.heap.wasm_allocator, wasm_io, .{});
+        _ = threads.workerEntry; // exported for worker.js
+        m.p.run(m.RiskStackApp, wasm_allocator, wasm_io, .{});
     }
 }
 
 // ---------------------------------------------------------------------------
 // Io implementation backed by browser APIs.
-// Everything not overridden here behaves like `std.Io.failing`.
+// Everything not overridden here behaves like `std.Io.failing`, except that
+// `async` runs the function right away. Groups run on web workers.
 // ---------------------------------------------------------------------------
 
 /// `Date.now()`: milliseconds since the Unix epoch.
@@ -46,6 +52,10 @@ const wasm_io_vtable: std.Io.VTable = blk: {
     vtable.now = ioNow;
     vtable.random = ioRandom;
     vtable.randomSecure = ioRandomSecure;
+    vtable.groupAsync = threads.groupAsync;
+    vtable.groupConcurrent = threads.groupConcurrent;
+    vtable.groupAwait = threads.groupAwait;
+    vtable.groupCancel = threads.groupCancel;
     break :blk vtable;
 };
 
@@ -57,7 +67,7 @@ const ft = @cImport({
     @cInclude("freetype/fttypes.h");
 });
 
-const wa = std.heap.wasm_allocator;
+const wa = wasm_allocator;
 
 fn ftAlloc(_: ft.FT_Memory, size: c_long) callconv(.c) ?*anyopaque {
     const buf = wa.alloc(u8, @intCast(size)) catch return null;

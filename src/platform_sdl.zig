@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const t = std.testing;
 
 const p = @import("platform.zig");
+const channel = @import("channel.zig");
 
 const c = @cImport({
     @cInclude("SDL3/SDL.h");
@@ -60,11 +61,16 @@ pub fn close() void {
     global_running = false;
 }
 
+pub fn asyncPostResult(comptime function: anytype, data: std.meta.ArgsTuple(@TypeOf(function))) !void {
+    try global_channel.post(function, data);
+}
+
 // ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
 
 var global_running: bool = false;
+var global_channel: channel.Channel = undefined;
 
 pub fn run(comptime App: type, gpa: std.mem.Allocator, io: std.Io, options: p.Options) void {
     if (builtin.target.os.tag == .linux) {
@@ -116,6 +122,9 @@ pub fn run(comptime App: type, gpa: std.mem.Allocator, io: std.Io, options: p.Op
     p.loadProcs();
     logGlInfo();
 
+    global_channel = .init(gpa);
+    defer global_channel.deinit();
+
     App.onInit(gpa, io, options);
     defer App.onDeinit();
 
@@ -130,6 +139,8 @@ pub fn run(comptime App: type, gpa: std.mem.Allocator, io: std.Io, options: p.Op
     var event: c.SDL_Event = undefined;
     main: while (global_running) {
         const t_frame_start = c.SDL_GetPerformanceCounter();
+
+        global_channel.drain();
 
         // Coalesce resize events: only re-query the window size once per frame.
         var pending_resize = false;

@@ -94,7 +94,7 @@ function initWebGL(canvas, getString) {
     gl.uniform4f(uniformLocation(locationId), x, y, z, w);
   const glUniformMatrix4fv = (locationId, dataLen, transpose, dataPtr) => {
     const floats = new Float32Array(wasmMemory.buffer, dataPtr, dataLen * 16);
-    gl.uniformMatrix4fv(uniformLocation(locationId), transpose, floats);
+    gl.uniformMatrix4fv(uniformLocation(locationId), transpose, floats.slice());
   };
   const glCreateBuffer = () => {
     glBuffers.push(gl.createBuffer());
@@ -149,7 +149,7 @@ function initWebGL(canvas, getString) {
     gl.bindBuffer(type, glBuffers[bufferId]);
   const glBufferData = (type, byteCount, dataPtr, drawType) => {
     const floats = new Float32Array(wasmMemory.buffer, dataPtr, byteCount / 4);
-    gl.bufferData(type, floats, drawType);
+    gl.bufferData(type, floats.slice(), drawType);
   };
   const glUseProgram = (programId) => gl.useProgram(glPrograms[programId]);
   const glEnableVertexAttribArray = (x) => gl.enableVertexAttribArray(x);
@@ -233,7 +233,7 @@ function initWebGL(canvas, getString) {
       border,
       format,
       type,
-      data,
+      data.slice(),
     );
   };
   const glTexParameteri = (target, pname, param) =>
