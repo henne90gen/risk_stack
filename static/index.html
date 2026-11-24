@@ -118,9 +118,11 @@
                         const value =
                             localStorage.getItem(getString(namePtr, nameLen)) ??
                             "";
-                        new TextEncoder().encodeInto(
-                            value,
-                            new Uint8Array(wasmMemory.buffer, bufPtr, bufLen),
+                        // encodeInto rejects views of the shared wasm
+                        // memory, so encode first and copy.
+                        const bytes = new TextEncoder().encode(value);
+                        new Uint8Array(wasmMemory.buffer, bufPtr, bufLen).set(
+                            bytes.subarray(0, bufLen),
                         );
                     },
 
