@@ -131,6 +131,18 @@ pub const Deck = struct {
         try self.cards.append(allocator, Card.TimesTwo);
     }
 
+    pub fn discard(self: *Deck, allocator: std.mem.Allocator, card: Card) !void {
+        try self.discarded.append(allocator, card);
+    }
+
+    /// Shuffles the discard pile into the draw pile. Cards still held by
+    /// players stay out of the deck, like in the physical game.
+    pub fn reshuffleDiscarded(self: *Deck, allocator: std.mem.Allocator) !void {
+        try self.cards.appendSlice(allocator, self.discarded.items);
+        self.discarded.clearRetainingCapacity();
+        self.shuffle();
+    }
+
     pub fn removeCard(self: *Deck, card: Card) !void {
         for (self.cards.items, 0..) |c, i| {
             if (c == card) {
@@ -242,20 +254,21 @@ pub const Player = struct {
         self.hand.deinit(allocator);
     }
 
-    pub fn handScore(self: *Player) u32 {
-        var score: u32 = 0;
+    pub fn handScore(self: *const Player) u32 {
+        var number_sum: u32 = 0;
+        var modifier_sum: u32 = 0;
         var number_cards: u32 = 0;
         var multiply_by_2: bool = false;
 
         for (self.hand.items) |c| {
             switch (c) {
                 .Zero, .One, .Two, .Three, .Four, .Five, .Six, .Seven, .Eight, .Nine, .Ten, .Eleven, .Twelve => {
-                    score += @intFromEnum(c);
+                    number_sum += @intFromEnum(c);
                     number_cards += 1;
                 },
                 .PlusTwo, .PlusFour, .PlusSix, .PlusEight, .PlusTen => {
                     const modifier = (@intFromEnum(c) - @intFromEnum(Card.PlusTwo) + 1) * 2;
-                    score += modifier;
+                    modifier_sum += modifier;
                 },
                 .TimesTwo => {
                     multiply_by_2 = true;
@@ -267,15 +280,25 @@ pub const Player = struct {
             }
         }
 
+        // x2 doubles only the number cards, not the +N cards or the Flip 7 bonus.
         if (multiply_by_2) {
-            score *= 2;
+            number_sum *= 2;
         }
 
+        var score = number_sum + modifier_sum;
         if (number_cards == 7) {
             score += 15;
         }
 
         return score;
+    }
+
+    pub fn numberCardCount(self: *const Player) u32 {
+        var count: u32 = 0;
+        for (self.hand.items) |c| {
+            if (c.isNumber()) count += 1;
+        }
+        return count;
     }
 
     test "handScore" {
@@ -323,31 +346,40 @@ pub const Player = struct {
         try t.expectEqual(93 + 15, player.handScore());
 
         try player.hand.append(allocator, .TimesTwo);
-        try t.expectEqual(186 + 15, player.handScore());
+        try t.expectEqual(63 * 2 + 30 + 15, player.handScore());
+    }
+
+    test "handScore TimesTwo does not double modifiers" {
+        const allocator = t.allocator;
+        var r = std.Random.DefaultPrng.init(0);
+        var player = try Player.init(allocator, r.random(), DrawStrategy.Always7);
+        defer player.deinit(allocator);
+
+        try player.hand.appendSlice(allocator, &.{ .Five, .PlusFour, .TimesTwo });
+        try t.expectEqual(5 * 2 + 4, player.handScore());
     }
 
     pub fn decideTakeCard(self: *Player, deck: *Deck) bool {
+        // Every round starts with a dealt card, so an empty hand always draws.
+        if (self.hand.items.len == 0) {
+            return true;
+        }
+
         switch (self.strategy) {
             .MinPoints => |min_points| {
                 return self.handScore() < min_points;
             },
             .MaxCards => |max_cards| {
-                var number_card_count: u32 = 0;
-                for (self.hand.items) |c| {
-                    if (c.isNumber()) {
-                        number_card_count += 1;
-                    }
-                }
-                return number_card_count < max_cards;
+                return self.numberCardCount() < max_cards;
             },
             .MinPointsMaxCards => |data| {
                 if (self.handScore() < data.min_points) {
                     return true;
                 }
-                return self.hand.items.len < data.max_cards;
+                return self.numberCardCount() < data.max_cards;
             },
             .Always7 => {
-                return self.hand.items.len < 7;
+                return self.numberCardCount() < 7;
             },
             .Random => {
                 return self.prng.boolean();
@@ -359,6 +391,10 @@ pub const Player = struct {
                 return self.prng.boolean();
             },
             .ChanceOfFailureBelow => |f| {
+                // A held SecondChance absorbs the next duplicate.
+                if (self.hasCard(.SecondChance)) {
+                    return true;
+                }
                 var p_total: f64 = 0.0;
                 for (self.hand.items) |c| {
                     if (!c.isNumber()) {
@@ -443,41 +479,37 @@ pub const Player = struct {
         try t.expect(player.decideTakeCard(&deck));
     }
 
-    pub fn takeCard(self: *Player, card: Card) bool {
+    pub const TakeCardResult = enum {
+        /// The card was added to the hand.
+        Taken,
+        /// The card was a duplicate; it and the SecondChance left the hand.
+        SecondChanceUsed,
+        /// The card was a duplicate and the player is eliminated.
+        Busted,
+        /// The card was the 7th unique number card. The round ends for everyone.
+        Flip7,
+    };
+
+    /// Adds `card` to the hand. Does not bank points; the caller ends the
+    /// round on `.Flip7`.
+    pub fn takeCard(self: *Player, card: Card) TakeCardResult {
+        std.debug.assert(card != .Freeze and card != .FlipThree);
+        for (self.hand.items) |held| {
+            if (held != card) continue;
+            // SecondChance saves the player: discard it together with the duplicate.
+            if (self.removeCard(.SecondChance)) {
+                return .SecondChanceUsed;
+            }
+            self.hand.appendAssumeCapacity(card);
+            self.state = .Eliminated;
+            return .Busted;
+        }
+
         self.hand.appendAssumeCapacity(card);
-
-        // check if any card is duplicated
-        for (0..self.hand.items.len - 1) |i| {
-            // always comparing to the last card, since that's the one that was just added
-            if (self.hand.items[i] == self.hand.items[self.hand.items.len - 1]) {
-                // SecondChance saves the player: remove the SecondChance instead of eliminating
-                if (self.removeCard(.SecondChance)) {
-                    // Remove the duplicate card that was just added
-                    _ = self.hand.pop();
-                    return false;
-                }
-
-                self.state = .Eliminated;
-                return false;
-            }
+        if (card.isNumber() and self.numberCardCount() == 7) {
+            return .Flip7;
         }
-
-        var number_card_count: u32 = 0;
-        for (self.hand.items) |c| {
-            switch (c) {
-                .Zero, .One, .Two, .Three, .Four, .Five, .Six, .Seven, .Eight, .Nine, .Ten, .Eleven, .Twelve => {
-                    number_card_count += 1;
-                },
-                else => {},
-            }
-        }
-
-        if (number_card_count == 7) {
-            self.score += self.handScore();
-            return true;
-        }
-
-        return false;
+        return .Taken;
     }
 
     test "takeCard fails on duplicate card" {
@@ -488,9 +520,9 @@ pub const Player = struct {
         var player = try Player.init(allocator, prng, DrawStrategy.Always7);
         defer player.deinit(allocator);
 
-        try t.expect(!player.takeCard(.Twelve));
+        try t.expectEqual(.Taken, player.takeCard(.Twelve));
         try t.expect(player.is_still_in_game());
-        try t.expect(!player.takeCard(.Twelve));
+        try t.expectEqual(.Busted, player.takeCard(.Twelve));
         try t.expect(!player.is_still_in_game());
     }
 
@@ -502,17 +534,15 @@ pub const Player = struct {
         var player = try Player.init(allocator, prng, DrawStrategy.Always7);
         defer player.deinit(allocator);
 
-        try t.expect(!player.takeCard(.SecondChance));
-        try t.expect(player.is_still_in_game());
-        try t.expect(!player.takeCard(.Twelve));
-        try t.expect(player.is_still_in_game());
+        try t.expectEqual(.Taken, player.takeCard(.SecondChance));
+        try t.expectEqual(.Taken, player.takeCard(.Twelve));
         // duplicate Twelve: SecondChance is consumed, player survives
-        try t.expect(!player.takeCard(.Twelve));
+        try t.expectEqual(.SecondChanceUsed, player.takeCard(.Twelve));
         try t.expect(player.is_still_in_game());
         try t.expect(!player.hasCard(.SecondChance));
         try t.expectEqual(1, player.hand.items.len); // only the first Twelve remains
         // now a second duplicate eliminates the player (no SecondChance left)
-        try t.expect(!player.takeCard(.Twelve));
+        try t.expectEqual(.Busted, player.takeCard(.Twelve));
         try t.expect(!player.is_still_in_game());
     }
 
@@ -524,17 +554,15 @@ pub const Player = struct {
         var player = try Player.init(allocator, prng, DrawStrategy.Always7);
         defer player.deinit(allocator);
 
-        // Player draws a SecondChance normally
-        try t.expect(!player.takeCard(.SecondChance));
-        try t.expect(player.is_still_in_game());
+        try t.expectEqual(.Taken, player.takeCard(.SecondChance));
         // Drawing a second SecondChance triggers the duplicate check; the existing
         // SecondChance in hand is consumed to save the player.
-        try t.expect(!player.takeCard(.SecondChance));
+        try t.expectEqual(.SecondChanceUsed, player.takeCard(.SecondChance));
         try t.expect(player.is_still_in_game());
         try t.expect(!player.hasCard(.SecondChance));
     }
 
-    test "takeCard ends round at 7 cards" {
+    test "takeCard reports Flip7 on the 7th number card without banking points" {
         const allocator = t.allocator;
         var r = std.Random.DefaultPrng.init(0);
         const prng = r.random();
@@ -542,20 +570,11 @@ pub const Player = struct {
         var player = try Player.init(allocator, prng, DrawStrategy.Always7);
         defer player.deinit(allocator);
 
-        try t.expect(!player.takeCard(.Zero));
-        try t.expect(player.is_still_in_game());
-        try t.expect(!player.takeCard(.One));
-        try t.expect(player.is_still_in_game());
-        try t.expect(!player.takeCard(.Two));
-        try t.expect(player.is_still_in_game());
-        try t.expect(!player.takeCard(.Three));
-        try t.expect(player.is_still_in_game());
-        try t.expect(!player.takeCard(.Four));
-        try t.expect(player.is_still_in_game());
-        try t.expect(!player.takeCard(.Five));
-        try t.expect(player.is_still_in_game());
-        try t.expect(player.takeCard(.Six));
-        try t.expect(player.is_still_in_game());
+        for ([_]Card{ .Zero, .One, .Two, .Three, .Four, .Five }) |c| {
+            try t.expectEqual(.Taken, player.takeCard(c));
+        }
+        try t.expectEqual(.Flip7, player.takeCard(.Six));
+        try t.expectEqual(0, player.score);
     }
 
     test "takeCard does not end round if 7th card is a not a number card" {
@@ -566,18 +585,9 @@ pub const Player = struct {
         var player = try Player.init(allocator, prng, DrawStrategy.Always7);
         defer player.deinit(allocator);
 
-        try t.expect(!player.takeCard(.Zero));
-        try t.expect(!player.takeCard(.One));
-        try t.expect(!player.takeCard(.Two));
-        try t.expect(!player.takeCard(.Three));
-        try t.expect(!player.takeCard(.Four));
-        try t.expect(!player.takeCard(.Five));
-        try t.expect(!player.takeCard(.PlusTwo));
-        try t.expect(!player.takeCard(.PlusFour));
-        try t.expect(!player.takeCard(.PlusSix));
-        try t.expect(!player.takeCard(.PlusEight));
-        try t.expect(!player.takeCard(.PlusTen));
-        try t.expect(!player.takeCard(.SecondChance));
+        for ([_]Card{ .Zero, .One, .Two, .Three, .Four, .Five, .PlusTwo, .PlusFour, .PlusSix, .PlusEight, .PlusTen, .SecondChance }) |c| {
+            try t.expectEqual(.Taken, player.takeCard(c));
+        }
     }
 
     pub fn hasCard(self: *Player, card: Card) bool {
@@ -652,6 +662,34 @@ pub const GameEvent = union(enum) {
         player: *Player,
         target: *Player,
     },
+    /// `player` got 7 unique number cards. Everyone still in the round
+    /// banks their points next (see `PlayerEndRound`).
+    Flip7: struct {
+        player: *Player,
+        score: u32,
+    },
+    /// `player` drew `card` as a duplicate; it and their SecondChance are discarded.
+    SecondChanceUsed: struct {
+        player: *Player,
+        card: Card,
+    },
+    /// `from` drew a SecondChance while holding one and passed it on. A
+    /// `DrawCard` for `to` follows.
+    SecondChancePassed: struct {
+        from: *Player,
+        to: *Player,
+    },
+    /// A drawn card was discarded without effect: a SecondChance nobody can
+    /// take, or a Freeze/FlipThree whose holder left the round first.
+    CardDiscarded: struct {
+        player: *Player,
+        card: Card,
+    },
+    /// The draw pile and discard pile are both empty; the round ends for
+    /// everyone still in it.
+    DeckExhausted: struct {},
+    /// No player is left in the round. Followed by `PlayerWon` or `NewRoundStarted`.
+    RoundEnded: struct {},
 };
 
 pub const GameResult = struct {
@@ -674,6 +712,8 @@ pub const GameSimulation = struct {
     players: []Player,
     player_selection_buffer: []*Player,
     current_player_index: u32,
+    /// Who takes the first turn this round; moves one seat each round.
+    round_starting_player_index: u32 = 0,
     cards_played: u32 = 0,
 
     events: std.ArrayList(GameEvent) = undefined,
@@ -715,42 +755,24 @@ pub const GameSimulation = struct {
             return false;
         }
 
-        var winning_player: ?*Player = null;
-        for (self.players) |*player| {
-            if (player.score >= 200) {
-                winning_player = player;
-                break;
+        if (!self.anyPlayerInGame()) {
+            try self.addEvent(.{ .RoundEnded = .{} });
+            // The game only ends at the end of a round.
+            if (self.findWinner()) |player| {
+                self.result_ = GameResult{
+                    .winning_strategy = player.strategy,
+                    .cards_played = self.cards_played,
+                };
+                try self.addEvent(.{ .PlayerWon = .{ .player = player, .score = player.score } });
+                self.log("Game simulation finished: player with strategy {} won with score {}", .{ player.strategy, player.score });
+                return false;
             }
-        }
-        if (winning_player) |player| {
-            self.result_ = GameResult{
-                .winning_strategy = player.strategy,
-                .cards_played = self.cards_played,
-            };
-            try self.addEvent(.{ .PlayerWon = .{ .player = player, .score = player.score } });
-            self.log("Game simulation finished: player with strategy {} won with score {}", .{ player.strategy, player.score });
-            return false;
-        }
-
-        var all_players_eliminated = true;
-        for (self.players) |p| {
-            if (p.is_still_in_game()) {
-                all_players_eliminated = false;
-                break;
-            }
-        }
-        if (all_players_eliminated) {
-            for (self.players) |*p| {
-                p.nextRound();
-            }
-            try self.addEvent(.{ .NewRoundStarted = .{} });
+            try self.startNewRound();
             return true;
         }
 
         if (self.deck.cards.items.len == 0) {
-            try self.deck.refill(self.allocator);
-            self.deck.shuffle();
-            try self.addEvent(.{ .DeckShuffle = .{} });
+            try self.reshuffleOrEndRound();
             return true;
         }
 
@@ -764,7 +786,7 @@ pub const GameSimulation = struct {
             player = &self.players[self.current_player_index];
 
             if (self.current_player_index == starting_player_index) {
-                // should never happen, but just in case: all players are eliminated, start a new round
+                // unreachable: anyPlayerInGame() was checked above
                 self.log("All players are eliminated, starting a new round", .{});
                 return true;
             }
@@ -781,30 +803,19 @@ pub const GameSimulation = struct {
             return true;
         }
 
-        const card = self.deck.cards.pop().?;
-        self.cards_played += 1;
+        // The draw pile is not empty, checked above.
+        const card = (try self.drawCard()).?;
         switch (card) {
             .Freeze => {
                 try self.addEvent(.{ .DrawCard = .{ .player = player, .card = card } });
                 try self.handleFreeze(player);
-                return true;
             },
             .FlipThree => {
                 try self.addEvent(.{ .DrawCard = .{ .player = player, .card = card } });
                 try self.handleFlipThree(player);
-                return true;
             },
-            .SecondChance => {
-                try self.handleSecondChance(player);
-                return true;
-            },
-            else => {
-                _ = player.takeCard(card);
-                try self.addEvent(.{ .DrawCard = .{ .player = player, .card = card } });
-                if (player.state == .Eliminated) {
-                    try self.addEvent(.{ .PlayerEliminated = .{ .player = player } });
-                }
-            },
+            .SecondChance => try self.handleSecondChance(player),
+            else => try self.giveCard(player, card),
         }
 
         return true;
@@ -814,10 +825,96 @@ pub const GameSimulation = struct {
         return self.result_.?;
     }
 
+    fn anyPlayerInGame(self: *const GameSimulation) bool {
+        for (self.players) |*p| {
+            if (p.is_still_in_game()) return true;
+        }
+        return false;
+    }
+
+    /// The player with the highest score, once someone has 200 or more.
+    /// A tie for the highest score plays another round.
+    fn findWinner(self: *GameSimulation) ?*Player {
+        var best: ?*Player = null;
+        var tied = false;
+        for (self.players) |*p| {
+            if (best == null or p.score > best.?.score) {
+                best = p;
+                tied = false;
+            } else if (p.score == best.?.score) {
+                tied = true;
+            }
+        }
+        const winner = best orelse return null;
+        if (winner.score < 200 or tied) return null;
+        return winner;
+    }
+
+    fn startNewRound(self: *GameSimulation) error{OutOfMemory}!void {
+        for (self.players) |*p| {
+            try self.deck.discarded.appendSlice(self.allocator, p.hand.items);
+            p.nextRound();
+        }
+        self.round_starting_player_index = (self.round_starting_player_index + 1) % @as(u32, @intCast(self.players.len));
+        self.current_player_index = self.round_starting_player_index;
+        try self.addEvent(.{ .NewRoundStarted = .{} });
+    }
+
+    /// Draws the top card, shuffling the discard pile in when the draw pile
+    /// is empty. Returns null when both are empty; the round has ended then.
+    fn drawCard(self: *GameSimulation) error{OutOfMemory}!?Card {
+        if (self.deck.cards.items.len == 0) {
+            try self.reshuffleOrEndRound();
+            if (self.deck.cards.items.len == 0) return null;
+        }
+        self.cards_played += 1;
+        return self.deck.cards.pop().?;
+    }
+
+    fn reshuffleOrEndRound(self: *GameSimulation) error{OutOfMemory}!void {
+        if (self.deck.discarded.items.len == 0) {
+            // Every card is in someone's hand (only possible with many players).
+            try self.addEvent(.{ .DeckExhausted = .{} });
+            try self.endRoundForAll();
+            return;
+        }
+        try self.deck.reshuffleDiscarded(self.allocator);
+        try self.addEvent(.{ .DeckShuffle = .{} });
+    }
+
+    /// Everyone still in the round banks their points.
+    fn endRoundForAll(self: *GameSimulation) error{OutOfMemory}!void {
+        for (self.players) |*p| {
+            if (!p.is_still_in_game()) continue;
+            p.endRound();
+            try self.addEvent(.{ .PlayerEndRound = .{ .player = p, .score = p.score } });
+        }
+    }
+
+    /// Puts a number, modifier or SecondChance card into `player`'s hand and
+    /// resolves the outcome.
+    fn giveCard(self: *GameSimulation, player: *Player, card: Card) error{OutOfMemory}!void {
+        const outcome = player.takeCard(card);
+        try self.addEvent(.{ .DrawCard = .{ .player = player, .card = card } });
+        switch (outcome) {
+            .Taken => {},
+            .SecondChanceUsed => {
+                try self.deck.discard(self.allocator, .SecondChance);
+                try self.deck.discard(self.allocator, card);
+                try self.addEvent(.{ .SecondChanceUsed = .{ .player = player, .card = card } });
+            },
+            .Busted => try self.addEvent(.{ .PlayerEliminated = .{ .player = player } }),
+            .Flip7 => {
+                player.endRound();
+                try self.addEvent(.{ .Flip7 = .{ .player = player, .score = player.score } });
+                try self.endRoundForAll();
+            },
+        }
+    }
+
     fn handleSecondChance(self: *GameSimulation, player: *Player) error{OutOfMemory}!void {
         if (!player.hasCard(.SecondChance)) {
-            _ = player.takeCard(.SecondChance);
-            try self.addEvent(.{ .DrawCard = .{ .player = player, .card = .SecondChance } });
+            try self.giveCard(player, .SecondChance);
             return;
         }
 
@@ -831,13 +928,15 @@ pub const GameSimulation = struct {
         }
 
         if (available_players.items.len == 0) {
-            // No eligible recipient: discard.
+            try self.deck.discard(self.allocator, .SecondChance);
+            try self.addEvent(.{ .CardDiscarded = .{ .player = player, .card = .SecondChance } });
             return;
         }
 
         const random_index = self.prng.intRangeLessThan(u32, 0, @intCast(available_players.items.len));
-        _ = available_players.items[random_index].takeCard(.SecondChance);
-        try self.addEvent(.{ .DrawCard = .{ .player = player, .card = .SecondChance } });
+        const recipient = available_players.items[random_index];
+        try self.addEvent(.{ .SecondChancePassed = .{ .from = player, .to = recipient } });
+        try self.giveCard(recipient, .SecondChance);
     }
 
     test "handleSecondChance simple case" {
@@ -866,7 +965,14 @@ pub const GameSimulation = struct {
         try t.expectEqual(true, other_player.hand.items[0] == .SecondChance);
     }
 
-    fn handleFreeze(self: *GameSimulation, player: *Player) !void {
+    fn handleFreeze(self: *GameSimulation, player: *Player) error{OutOfMemory}!void {
+        try self.deck.discard(self.allocator, .Freeze);
+        if (!player.is_still_in_game()) {
+            // The holder left the round (bust, Flip 7) before resolving it.
+            try self.addEvent(.{ .CardDiscarded = .{ .player = player, .card = .Freeze } });
+            return;
+        }
+
         // TODO make this a configurable strategy, doing it randomly for now
         var available_players = std.ArrayList(*Player).initBuffer(self.player_selection_buffer);
         for (self.players) |*p| {
@@ -919,58 +1025,41 @@ pub const GameSimulation = struct {
     fn drawThreeCards(self: *GameSimulation, player: *Player, target: *Player) error{OutOfMemory}!void {
         try self.addEvent(.{ .FlipThreeStarted = .{ .player = player, .target = target } });
 
+        // Freeze and FlipThree are resolved after the three cards. Their
+        // handlers discard them if the target left the round by then.
         var freeze_count: u8 = 0;
         var flip_three_count: u8 = 0;
-        var should_resolve_action_cards = true;
         for (0..3) |_| {
-            if (self.deck.cards.items.len == 0) {
-                try self.deck.refill(self.allocator);
-                self.deck.shuffle();
-                try self.addEvent(.{ .DeckShuffle = .{} });
-            }
-
-            const drawn = self.deck.cards.pop().?;
-            self.cards_played += 1;
-            if (drawn == .Freeze or drawn == .FlipThree) {
-                try self.addEvent(.{ .DrawCard = .{ .player = target, .card = drawn } });
-            }
-            if (drawn == .Freeze) {
-                freeze_count += 1;
-                continue;
-            }
-            if (drawn == .FlipThree) {
-                flip_three_count += 1;
-                continue;
-            }
-            if (drawn == .SecondChance) {
-                try self.handleSecondChance(target);
-                continue;
-            }
-
-            const round_over = target.takeCard(drawn);
-            try self.addEvent(.{ .DrawCard = .{ .player = target, .card = drawn } });
-            if (target.state == .Eliminated) {
-                try self.addEvent(.{ .PlayerEliminated = .{ .player = target } });
-            }
-            if (round_over or !target.is_still_in_game()) {
-                should_resolve_action_cards = false;
-                break;
+            if (!target.is_still_in_game()) break;
+            const drawn = (try self.drawCard()) orelse break;
+            switch (drawn) {
+                .Freeze, .FlipThree => {
+                    try self.addEvent(.{ .DrawCard = .{ .player = target, .card = drawn } });
+                    if (drawn == .Freeze) freeze_count += 1 else flip_three_count += 1;
+                },
+                .SecondChance => try self.handleSecondChance(target),
+                else => try self.giveCard(target, drawn),
             }
         }
 
-        if (should_resolve_action_cards) {
-            for (0..flip_three_count) |_| {
-                try self.handleFlipThree(target);
-            }
-            for (0..freeze_count) |_| {
-                try self.handleFreeze(target);
-            }
+        for (0..flip_three_count) |_| {
+            try self.handleFlipThree(target);
+        }
+        for (0..freeze_count) |_| {
+            try self.handleFreeze(target);
         }
 
         try self.addEvent(.{ .FlipThreeEnded = .{ .player = player, .target = target } });
     }
 
-    fn handleFlipThree(self: *GameSimulation, player: *Player) !void {
+    fn handleFlipThree(self: *GameSimulation, player: *Player) error{OutOfMemory}!void {
+        if (!player.is_still_in_game()) {
+            // The holder left the round (bust, Flip 7) before resolving it.
+            try self.deck.discard(self.allocator, .FlipThree);
+            try self.addEvent(.{ .CardDiscarded = .{ .player = player, .card = .FlipThree } });
+            return;
+        }
+
         // TODO make this a configurable strategy, doing it randomly for now
         var available_players = std.ArrayList(*Player).initBuffer(self.player_selection_buffer);
         for (self.players) |*p| {
@@ -983,16 +1072,14 @@ pub const GameSimulation = struct {
             available_players.appendAssumeCapacity(p);
         }
 
-        if (available_players.items.len == 0) {
-            // No targets: the player who drew FlipThree must draw 3 cards themselves.
-            try self.drawThreeCards(player, player);
-            return;
-        }
-
-        const random_index = self.prng.intRangeLessThan(u32, 0, @intCast(available_players.items.len));
-        const flip_three_target = available_players.items[random_index];
-        std.debug.assert(flip_three_target != player);
+        // No targets: the player who drew FlipThree must draw 3 cards themselves.
+        const flip_three_target = if (available_players.items.len == 0)
+            player
+        else
+            available_players.items[self.prng.intRangeLessThan(u32, 0, @intCast(available_players.items.len))];
         try self.drawThreeCards(player, flip_three_target);
+        // Discarded only now so a reshuffle during the draws can't bring it back.
+        try self.deck.discard(self.allocator, .FlipThree);
     }
 
     test "FlipThree deals every card only to the target" {
@@ -1122,6 +1209,174 @@ pub const GameSimulation = struct {
         try t.expectEqual(false, drawing_player.is_still_in_game());
     }
 
+    test "Flip 7 ends the round for everyone and banks the points once" {
+        var tf = try TestFixture.init(t.allocator, 2, &[_]Card{.Six});
+        defer tf.deinit();
+        const sim = &tf.simulation;
+        const flipper = &sim.players[0];
+        const other = &sim.players[1];
+        flipper.strategy = .Always7;
+        try flipper.hand.appendSlice(t.allocator, &.{ .Zero, .One, .Two, .Three, .Four, .Five });
+        try other.hand.append(t.allocator, .Ten);
+
+        try t.expect(try sim.step());
+        try t.expectEqual(PlayerState.RoundEnded, flipper.state);
+        try t.expectEqual(PlayerState.RoundEnded, other.state);
+        try t.expectEqual(21 + 15, flipper.score);
+        try t.expectEqual(10, other.score);
+
+        // Next step starts a new round without banking anything again.
+        try t.expect(try sim.step());
+        try t.expectEqual(21 + 15, flipper.score);
+        try t.expectEqual(10, other.score);
+        try t.expectEqual(PlayerState.InGame, flipper.state);
+        try t.expectEqual(0, flipper.hand.items.len);
+    }
+
+    test "game ends only at the end of a round, won by the highest score" {
+        var tf = try TestFixture.init(t.allocator, 3, &[_]Card{});
+        defer tf.deinit();
+        const sim = &tf.simulation;
+        sim.settings.events_enabled = true;
+        sim.players[0].score = 205;
+        sim.players[0].state = .RoundEnded;
+        sim.players[1].score = 150;
+        sim.players[2].score = 230;
+        sim.players[2].state = .Frozen;
+
+        // Player 1 is still in the round.
+        try t.expect(try sim.step());
+        try t.expectEqual(null, sim.result_);
+
+        sim.players[1].state = .Eliminated;
+        try t.expect(!try sim.step());
+        const won = sim.events.items[sim.events.items.len - 1].PlayerWon;
+        try t.expectEqual(&sim.players[2], won.player);
+    }
+
+    test "a tie for the highest score plays another round" {
+        var tf = try TestFixture.init(t.allocator, 2, &[_]Card{});
+        defer tf.deinit();
+        const sim = &tf.simulation;
+        for (sim.players) |*p| {
+            p.score = 210;
+            p.state = .RoundEnded;
+        }
+        try t.expect(try sim.step());
+        try t.expectEqual(null, sim.result_);
+        try t.expect(sim.players[0].is_still_in_game());
+    }
+
+    test "the starting player moves one seat each round" {
+        var tf = try TestFixture.init(t.allocator, 3, &[_]Card{});
+        defer tf.deinit();
+        const sim = &tf.simulation;
+        for (sim.players) |*p| p.state = .RoundEnded;
+        try t.expect(try sim.step());
+        try t.expectEqual(1, sim.current_player_index);
+        for (sim.players) |*p| p.state = .RoundEnded;
+        try t.expect(try sim.step());
+        try t.expectEqual(2, sim.current_player_index);
+    }
+
+    test "reshuffling uses the discard pile, not cards held by players" {
+        var tf = try TestFixture.init(t.allocator, 2, &[_]Card{});
+        defer tf.deinit();
+        const sim = &tf.simulation;
+        sim.deck.cards.clearRetainingCapacity();
+        sim.deck.discarded.clearRetainingCapacity();
+        try sim.deck.discarded.append(t.allocator, .Three);
+        try sim.players[0].hand.append(t.allocator, .Twelve);
+
+        try t.expect(try sim.step());
+        try t.expectEqualSlices(Card, &.{.Three}, sim.deck.cards.items);
+        try t.expectEqual(0, sim.deck.discarded.items.len);
+    }
+
+    test "a busted player does not resolve a pending Freeze" {
+        // The FlipThree targets the drawer (nobody else is in the round) and
+        // draws FlipThree, Freeze, One. The nested FlipThree draws a duplicate Five.
+        var tf = try TestFixture.init(t.allocator, 2, &[_]Card{ .Five, .One, .Freeze, .FlipThree });
+        defer tf.deinit();
+        const sim = &tf.simulation;
+        const player = &sim.players[0];
+        sim.players[1].state = .RoundEnded;
+        try player.hand.append(t.allocator, .Five);
+
+        try sim.handleFlipThree(player);
+        try t.expectEqual(PlayerState.Eliminated, player.state);
+        try t.expectEqual(0, player.score);
+    }
+
+    test "a passed SecondChance is reported for its recipient" {
+        var tf = try TestFixture.init(t.allocator, 2, &[_]Card{});
+        defer tf.deinit();
+        const sim = &tf.simulation;
+        sim.settings.events_enabled = true;
+        const from = &sim.players[0];
+        const to = &sim.players[1];
+        try from.hand.append(t.allocator, .SecondChance);
+
+        try sim.handleSecondChance(from);
+        try t.expectEqual(2, sim.events.items.len);
+        const passed = sim.events.items[0].SecondChancePassed;
+        try t.expectEqual(from, passed.from);
+        try t.expectEqual(to, passed.to);
+        try t.expectEqual(to, sim.events.items[1].DrawCard.player);
+    }
+
+    test "a used SecondChance and the duplicate go to the discard pile" {
+        var tf = try TestFixture.init(t.allocator, 2, &[_]Card{});
+        defer tf.deinit();
+        const sim = &tf.simulation;
+        const player = &sim.players[0];
+        try player.hand.appendSlice(t.allocator, &.{ .Seven, .SecondChance });
+        try sim.giveCard(player, .Seven);
+        try t.expectEqualSlices(Card, &.{.Seven}, player.hand.items);
+        try t.expectEqualSlices(Card, &.{ .SecondChance, .Seven }, sim.deck.discarded.items);
+    }
+
+    test "Always7 and MinPointsMaxCards count only number cards" {
+        var tf = try TestFixture.init(t.allocator, 1, &[_]Card{});
+        defer tf.deinit();
+        const player = &tf.simulation.players[0];
+        try player.hand.appendSlice(t.allocator, &.{ .One, .Two, .Three, .Four, .Five, .Six, .PlusTwo });
+        player.strategy = .Always7;
+        try t.expect(player.decideTakeCard(&tf.simulation.deck));
+        player.strategy = .{ .MinPointsMaxCards = .{ .min_points = 0, .max_cards = 7 } };
+        try t.expect(player.decideTakeCard(&tf.simulation.deck));
+    }
+
+    fn expectAllCardsAccountedFor(sim: *GameSimulation) !void {
+        var total = sim.deck.cards.items.len + sim.deck.discarded.items.len;
+        for (sim.players) |p| total += p.hand.items.len;
+        try t.expectEqual(94, total);
+    }
+
+    test "whole games keep all 94 cards and terminate" {
+        // Greedy players reach Flip 7, and 22 of them run the deck dry (DeckExhausted).
+        for ([_]u32{ 2, 4, 22 }) |num_players| {
+            var tf = try TestFixture.init(t.allocator, num_players, &[_]Card{});
+            defer tf.deinit();
+            const sim = &tf.simulation;
+            sim.settings.events_enabled = true;
+            for (sim.players) |*p| p.strategy = .Always7;
+            var steps: u32 = 0;
+            while (try sim.step()) : (steps += 1) {
+                try expectAllCardsAccountedFor(sim);
+                for (sim.players) |p| try t.expect(p.numberCardCount() <= 7);
+                try t.expect(steps < 100_000);
+            }
+            var best: u32 = 0;
+            for (sim.players) |p| best = @max(best, p.score);
+            try t.expect(best >= 200);
+
+            var exhausted = false;
+            for (sim.events.items) |e| exhausted = exhausted or e == .DeckExhausted;
+            try t.expectEqual(num_players == 22, exhausted);
+        }
+    }
+
     const SavedPlayer = struct {
         hand: []const Card,
         score: u32,
@@ -1133,6 +1388,7 @@ pub const GameSimulation = struct {
         discarded: []const Card = &.{},
         players: []const SavedPlayer,
         current_player_index: u32 = 0,
+        round_starting_player_index: u32 = 0,
         cards_played: u32 = 0,
         /// Exact generator state from `save`, see `encodePrngState`. Takes precedence over `seed`.
         prng_state: ?[]const u8 = null,
@@ -1180,6 +1436,7 @@ pub const GameSimulation = struct {
             .discarded = self.deck.discarded.items,
             .players = players,
             .current_player_index = self.current_player_index,
+            .round_starting_player_index = self.round_starting_player_index,
             .cards_played = self.cards_played,
             .prng_state = &prng_state,
         };
@@ -1193,7 +1450,7 @@ pub const GameSimulation = struct {
         const s = try tf.simulation.save(tf.allocator);
         defer tf.allocator.free(s);
         try t.expectEqualStrings(
-            \\{"deck":["Seven","Twelve","FlipThree","Seven","Eleven","Eight","Nine","Eight","Six","One","Five","FlipThree","Eight","Six","Twelve","Freeze","SecondChance","Eight","PlusTwo","Three","Nine","Six","Seven","Nine","Six","Ten","Eleven","Ten","SecondChance","Freeze","Twelve","Three","Eight","Ten","Zero","Twelve","Twelve","Nine","Eleven","Twelve","Twelve","Eleven","Nine","Nine","Four","FlipThree","Three","Eleven","Five","Freeze","Ten","Twelve","Eleven","Eleven","Ten","PlusFour","Two","Two","SecondChance","Four","Nine","Four","PlusEight","Ten","Ten","Five","Eight","Five","Seven","Twelve","Nine","Eleven","PlusTen","Five","Twelve","Six","Eleven","Eight","TimesTwo","Six","Twelve","Eight","Nine","Twelve","Seven","Four","Ten","Eleven","Eleven","Ten","Seven","PlusSix","Seven","Ten"],"discarded":[],"players":[{"hand":[],"score":0,"state":"InGame","strategy":{"Random":{}}},{"hand":[],"score":0,"state":"InGame","strategy":{"Random":{}}}],"current_player_index":0,"cards_played":0,"prng_state":"cb266253fc824a6f7b5c030fb46a88ff6f9d8afede5704d0b5c55d5a9cb43353"}
+            \\{"deck":["Seven","Twelve","FlipThree","Seven","Eleven","Eight","Nine","Eight","Six","One","Five","FlipThree","Eight","Six","Twelve","Freeze","SecondChance","Eight","PlusTwo","Three","Nine","Six","Seven","Nine","Six","Ten","Eleven","Ten","SecondChance","Freeze","Twelve","Three","Eight","Ten","Zero","Twelve","Twelve","Nine","Eleven","Twelve","Twelve","Eleven","Nine","Nine","Four","FlipThree","Three","Eleven","Five","Freeze","Ten","Twelve","Eleven","Eleven","Ten","PlusFour","Two","Two","SecondChance","Four","Nine","Four","PlusEight","Ten","Ten","Five","Eight","Five","Seven","Twelve","Nine","Eleven","PlusTen","Five","Twelve","Six","Eleven","Eight","TimesTwo","Six","Twelve","Eight","Nine","Twelve","Seven","Four","Ten","Eleven","Eleven","Ten","Seven","PlusSix","Seven","Ten"],"discarded":[],"players":[{"hand":[],"score":0,"state":"InGame","strategy":{"Random":{}}},{"hand":[],"score":0,"state":"InGame","strategy":{"Random":{}}}],"current_player_index":0,"round_starting_player_index":0,"cards_played":0,"prng_state":"cb266253fc824a6f7b5c030fb46a88ff6f9d8afede5704d0b5c55d5a9cb43353"}
         , s);
     }
 
@@ -1205,6 +1462,13 @@ pub const GameSimulation = struct {
         const saved = parsed.value;
         if (saved.players.len == 0) return error.NoPlayers;
         if (saved.current_player_index >= saved.players.len) return error.InvalidCurrentPlayerIndex;
+        if (saved.round_starting_player_index >= saved.players.len) return error.InvalidCurrentPlayerIndex;
+        for (saved.players) |saved_player| {
+            // Freeze and FlipThree are resolved on the spot, never held.
+            for (saved_player.hand) |card| {
+                if (card == .Freeze or card == .FlipThree) return error.InvalidHand;
+            }
+        }
         const prng_state: ?[4]u64 = if (saved.prng_state) |text| try decodePrngState(text) else null;
 
         // Build everything that can fail before touching `self`.
@@ -1217,7 +1481,9 @@ pub const GameSimulation = struct {
         for (players, saved.players) |*player, saved_player| {
             player.* = try Player.init(self.allocator, self.prng, saved_player.strategy);
             initialized += 1;
-            try player.hand.appendSlice(self.allocator, saved_player.hand);
+            // takeCard appends without allocating, keep room for one more card.
+            try player.hand.ensureTotalCapacity(self.allocator, saved_player.hand.len + 1);
+            player.hand.appendSliceAssumeCapacity(saved_player.hand);
             player.score = saved_player.score;
             player.state = saved_player.state;
         }
@@ -1239,6 +1505,7 @@ pub const GameSimulation = struct {
         self.deck.discarded.appendSliceAssumeCapacity(saved.discarded);
 
         self.current_player_index = saved.current_player_index;
+        self.round_starting_player_index = saved.round_starting_player_index;
         self.cards_played = saved.cards_played;
         self.result_ = null;
         self.events.clearRetainingCapacity();
@@ -1341,7 +1608,7 @@ pub const GameSimulation = struct {
         for (0..40) |_| _ = try tf.simulation.step();
         const saved = try tf.simulation.save(t.allocator);
         defer t.allocator.free(saved);
-        try t.expectEqual(@as(u64, 14917618236895209355), std.hash.Wyhash.hash(0, saved));
+        try t.expectEqual(@as(u64, 2039900527274424167), std.hash.Wyhash.hash(0, saved));
     }
 
     test "load requires state and strategy for every player" {
