@@ -1,0 +1,51 @@
+{
+  "deck": [
+    "Eight",
+    "Three",
+    "Ten",
+    "Two",
+    "Twelve",
+    "Nine",
+    "Eleven",
+    "Four",
+    "SecondChance"
+  ],
+  "discarded": [],
+  "players": [
+    {
+      "hand": [
+        "Three",
+        "SecondChance"
+      ],
+      "score": 0,
+      "state": "InGame",
+      "strategy": {
+        "MinPoints": 40
+      }
+    },
+    {
+      "hand": [
+        "Ten",
+        "SecondChance"
+      ],
+      "score": 0,
+      "state": "InGame",
+      "strategy": {
+        "MinPoints": 40
+      }
+    },
+    {
+      "hand": [
+        "Nine"
+      ],
+      "score": 9,
+      "state": "RoundEnded",
+      "strategy": {
+        "MinPoints": 40
+      }
+    }
+  ],
+  "current_player_index": 0,
+  "cards_played": 0,
+  "seed": 1
+}

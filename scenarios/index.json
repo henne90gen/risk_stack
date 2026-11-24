@@ -24,6 +24,46 @@
       "name": "FlipThree draws a Freeze for its target",
       "file": "flip_three_draws_freeze.json",
       "steps": 1
+    },
+    {
+      "name": "Flip 7 ends the round, then a new round starts",
+      "file": "flip_seven.json",
+      "steps": 2
+    },
+    {
+      "name": "A second Second Chance is passed on",
+      "file": "second_chance_passed.json",
+      "steps": 1
+    },
+    {
+      "name": "A Second Chance nobody can take is discarded",
+      "file": "second_chance_discarded.json",
+      "steps": 1
+    },
+    {
+      "name": "Second Chance saves from a duplicate",
+      "file": "second_chance_used.json",
+      "steps": 1
+    },
+    {
+      "name": "The discard pile is shuffled into the deck",
+      "file": "reshuffle.json",
+      "steps": 2
+    },
+    {
+      "name": "Running out of cards ends the round",
+      "file": "deck_exhausted.json",
+      "steps": 1
+    },
+    {
+      "name": "A busted player's pending Freeze is discarded",
+      "file": "pending_freeze_discarded.json",
+      "steps": 1
+    },
+    {
+      "name": "A player reaches 200 points and wins",
+      "file": "player_wins.json",
+      "steps": 2
     }
   ]
 }

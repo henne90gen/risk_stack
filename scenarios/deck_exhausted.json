@@ -1,0 +1,40 @@
+{
+  "deck": [],
+  "discarded": [],
+  "players": [
+    {
+      "hand": [
+        "Five",
+        "Six"
+      ],
+      "score": 0,
+      "state": "InGame",
+      "strategy": {
+        "MinPoints": 40
+      }
+    },
+    {
+      "hand": [
+        "Ten"
+      ],
+      "score": 0,
+      "state": "InGame",
+      "strategy": {
+        "MinPoints": 40
+      }
+    },
+    {
+      "hand": [
+        "Nine"
+      ],
+      "score": 9,
+      "state": "RoundEnded",
+      "strategy": {
+        "MinPoints": 40
+      }
+    }
+  ],
+  "current_player_index": 0,
+  "cards_played": 0,
+  "seed": 1
+}
