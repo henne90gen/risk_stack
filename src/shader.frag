@@ -16,7 +16,7 @@ void main() {
         fragColor = texture(uCardTexture, vUV);
     } else if (vRenderType == 1) {
         vec4 mask = texture(uFontTexture, vUV);
-        fragColor = vec4(vColor.rgb, mask.r);
+        fragColor = vec4(vColor.rgb, mask.r * vColor.a);
     } else {
         fragColor = vColor;
     }

@@ -1,5 +1,4 @@
 const std = @import("std");
-const t = std.testing;
 
 pub const p = @import("platform.zig");
 const zm = @import("zmath");
@@ -8,7 +7,7 @@ const text = @import("text.zig");
 const card_art = @import("cards.zig");
 
 test {
-    t.refAllDecls(@This());
+    std.testing.refAllDecls(@This());
 }
 
 // Strip the first line (#version ...) from the embedded shader source and
@@ -134,23 +133,124 @@ const OpenGLState = struct {
     u_loc_projection: i32 = 0,
 };
 
-const Animation = union(enum) {
-    deal_card: struct {
-        player: *f.Player,
-        card: f.Card,
-        t: f32 = 0.0,
-    },
-    freeze_player: struct {
-        freezing_player: *f.Player,
-        frozen_player: *f.Player,
-        t: f32 = 0.0,
-    },
-    flip_three_start: struct {
-        player: *f.Player,
-        target: *f.Player,
-        t: f32 = 0.0,
-    },
-    flip_three_end: struct {},
+// Table layout in world units, see `render`.
+const card_w: f32 = 0.12;
+const card_h: f32 = 0.17;
+const card_spacing: f32 = card_w * 1.1;
+/// Distance of the players' hands from the table center.
+const table_radius: f32 = 0.5;
+/// Distance from the center for cards placed in front of a player.
+const front_distance: f32 = table_radius - card_h * 1.2;
+/// Distance from the center of the players' score lines.
+const text_radius: f32 = 0.7;
+const deck_pos = [2]f32{ -card_w * 0.65, 0.0 };
+const discard_pos = [2]f32{ card_w * 0.65, 0.0 };
+/// Orientation of the deck and discard pile cards.
+const pile_angle: f32 = std.math.pi;
+
+const color_text = zm.f32x4(0.0, 1.0, 1.0, 1.0);
+const color_bust = zm.f32x4(1.0, 0.35, 0.35, 1.0);
+const color_stay = zm.f32x4(0.45, 1.0, 0.45, 1.0);
+const color_flip7 = zm.f32x4(1.0, 0.85, 0.2, 1.0);
+const color_frozen = zm.f32x4(0.55, 0.8, 1.0, 1.0);
+const color_saved = zm.f32x4(1.0, 0.6, 0.2, 1.0);
+const color_info = zm.f32x4(0.9, 0.9, 0.9, 1.0);
+
+/// Short text that lives inside an animation, without an allocation.
+const Label = struct {
+    buf: [48]u8 = undefined,
+    len: usize = 0,
+
+    fn init(comptime fmt: []const u8, args: anytype) Label {
+        var label = Label{};
+        // Too long texts are cut off.
+        label.len = (std.fmt.bufPrint(&label.buf, fmt, args) catch @as([]u8, &label.buf)).len;
+        return label;
+    }
+
+    fn slice(self: *const Label) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
+/// One step of the visualization of a simulation event. The queue plays them
+/// one after the other; each updates the shown table when it starts and/or
+/// finishes, see `startAnimation` and `finishAnimation`.
+const Animation = struct {
+    /// Progress from 0 to 1.
+    t: f32 = 0.0,
+    started: bool = false,
+    /// Where the moving card starts, set when the animation starts.
+    from: [2]f32 = .{ 0.0, 0.0 },
+    from_angle: f32 = pile_angle,
+    kind: Kind,
+
+    const Kind = union(enum) {
+        /// A card flies from the deck, or from in front of `source`, to
+        /// `player`. Number, modifier and SecondChance cards join the hand;
+        /// with `to_front` the card lands in front of the player instead,
+        /// waiting to be resolved.
+        deal_card: struct {
+            player: *f.Player,
+            card: f.Card,
+            source: ?*f.Player = null,
+            to_front: bool = false,
+        },
+        /// The Freeze in front of `freezing_player` flies onto `frozen_player`'s hand.
+        freeze_player: struct {
+            freezing_player: *f.Player,
+            frozen_player: *f.Player,
+            score: u32,
+        },
+        /// The FlipThree in front of `player` flies in front of `target`.
+        flip_three_start: struct {
+            player: *f.Player,
+            target: *f.Player,
+        },
+        /// The FlipThree in front of `target` goes to the discard pile.
+        flip_three_end: struct {
+            player: *f.Player,
+            target: *f.Player,
+        },
+        /// Cards from `player`'s hand, or from in front of them, go to the discard pile.
+        discard: struct {
+            player: *f.Player,
+            cards: [2]f.Card,
+            len: u8,
+            from_hand: bool,
+            /// A SecondChance saved the player.
+            saved: bool = false,
+        },
+        /// The player leaves the round: busted, stayed or Flip 7.
+        player_result: struct {
+            player: *f.Player,
+            state: f.PlayerState,
+            /// Total score after banking; null keeps the shown score.
+            score: ?u32,
+            outcome: enum { bust, stay, flip7 },
+        },
+        /// The discard pile is shuffled into the deck.
+        shuffle: struct { cards: usize = 0 },
+        /// All hands go to the discard pile for the next round.
+        collect_cards,
+        /// A message across the table center.
+        banner: struct { label: Label, color: zm.Vec },
+        won: struct { player: *f.Player, score: u32 },
+    };
+
+    /// Progress per frame.
+    fn speed(self: *const Animation) f32 {
+        return switch (self.kind) {
+            .deal_card, .flip_three_end, .discard => 0.05,
+            .freeze_player, .flip_three_start, .collect_cards => 0.03,
+            .shuffle => 0.025,
+            .banner => 0.02,
+            .won => 0.012,
+            // Shows its outcome as a floating text without holding up the
+            // queue, so it finishes within one frame at any frame rate.
+            .player_result => std.math.inf(f32),
+        };
+    }
 };
 
 const AnimationState = struct {
@@ -163,9 +263,52 @@ const AnimationState = struct {
     }
 };
 
+/// Text that rises above a player and fades out, alongside the queue.
+const FloatingText = struct {
+    player: *f.Player,
+    label: Label,
+    color: zm.Vec,
+    t: f32 = 0.0,
+};
+
 const FlipThreeStackEntry = struct {
     player: *f.Player,
     target: *f.Player,
+};
+
+/// A player as currently shown; trails the simulation while animations play.
+const ShownPlayer = struct {
+    hand: std.ArrayList(f.Card) = .empty,
+    /// Drawn Freeze, FlipThree and passed-on SecondChance cards, lying in
+    /// front of the player until they are resolved.
+    pending: std.ArrayList(f.Card) = .empty,
+    state: f.PlayerState = .InGame,
+    score: u32 = 0,
+
+    fn deinit(self: *ShownPlayer, allocator: std.mem.Allocator) void {
+        self.hand.deinit(allocator);
+        self.pending.deinit(allocator);
+    }
+};
+
+/// The table as currently shown; matches the simulation once the queue is empty.
+const ShownTable = struct {
+    players: std.ArrayList(ShownPlayer) = .empty,
+    deck_count: usize = 0,
+    discard_count: usize = 0,
+    discard_top: ?f.Card = null,
+    /// Set once the PlayerWon animation is done.
+    winner: ?struct { index: usize, score: u32 } = null,
+
+    fn deinit(self: *ShownTable, allocator: std.mem.Allocator) void {
+        for (self.players.items) |*player| player.deinit(allocator);
+        self.players.deinit(allocator);
+    }
+
+    fn discard(self: *ShownTable, card: f.Card) void {
+        self.discard_count += 1;
+        self.discard_top = card;
+    }
 };
 
 const AppState = struct {
@@ -189,7 +332,8 @@ const AppState = struct {
     prng: std.Random.DefaultPrng,
     simulation: f.GameSimulation = undefined,
     flip_three_stack: std.ArrayList(FlipThreeStackEntry),
-    shown_hands: std.ArrayList(std.ArrayList(f.Card)) = .empty,
+    shown: ShownTable = .{},
+    floating_texts: std.ArrayList(FloatingText) = .empty,
     should_run_next_step: bool = false,
     /// Steps still to run on their own, from `--steps`.
     auto_steps: u32 = 0,
@@ -203,6 +347,8 @@ const AppState = struct {
     /// localStorage entry in the browser. Set with `--scenario`.
     scenario_path: []const u8 = "scenario.json",
     next_event_to_process_index: usize = 0,
+    /// When the previous frame was updated, to advance animations by time.
+    last_frame: ?std.Io.Timestamp = null,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) !AppState {
         var buf = [_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 };
@@ -224,8 +370,8 @@ const AppState = struct {
         self.simulation.deinit();
         self.font.deinit(self.allocator);
         self.flip_three_stack.deinit(self.allocator);
-        for (self.shown_hands.items) |*hand| hand.deinit(self.allocator);
-        self.shown_hands.deinit(self.allocator);
+        self.shown.deinit(self.allocator);
+        self.floating_texts.deinit(self.allocator);
         self.animation.queue.deinit(self.allocator);
         self.frame_arena.deinit();
     }
@@ -249,7 +395,7 @@ pub const RiskStackApp = struct {
         app_state.simulation.settings.logging_enabled = true;
         app_state.simulation.settings.events_enabled = true;
 
-        syncShownHands() catch @panic("failed to set up the shown hands");
+        syncShown() catch @panic("failed to set up the shown table");
         if (options.scenario) |path| {
             app_state.scenario_path = path;
             loadScenario() catch |err| {
@@ -469,38 +615,29 @@ pub const RiskStackApp = struct {
     }
 
     fn update() !void {
-        if (app_state.animation.queue.items.len == 0) try syncShownHands();
+        // Animation speeds are tuned per frame at 60 fps; scale them by the
+        // real frame time so they look the same at any frame rate.
+        const now = std.Io.Clock.awake.now(app_state.io);
+        const frames: f32 = if (app_state.last_frame) |last|
+            std.math.clamp(@as(f32, @floatFromInt(last.durationTo(now).nanoseconds)) / (@as(f32, std.time.ns_per_s) / 60.0), 0.0, 6.0)
+        else
+            1.0;
+        app_state.last_frame = now;
 
-        for (app_state.animation.queue.items) |*animation| {
-            switch (animation.*) {
-                .deal_card => |*data| {
-                    data.t += 0.05;
-                    if (data.t >= 1.0) {
-                        if (data.card != .Freeze and data.card != .FlipThree) {
-                            try app_state.shown_hands.items[playerIndex(data.player)].append(app_state.allocator, data.card);
-                        }
-                        _ = app_state.animation.queue.orderedRemove(0);
-                    }
-                },
-                .freeze_player => |*data| {
-                    data.t += 0.03;
-                    if (data.t >= 1.0) {
-                        _ = app_state.animation.queue.orderedRemove(0);
-                    }
-                },
-                .flip_three_start => |*data| {
-                    data.t += 0.03;
-                    if (data.t >= 1.0) {
-                        try app_state.flip_three_stack.append(app_state.allocator, .{ .player = data.player, .target = data.target });
-                        _ = app_state.animation.queue.orderedRemove(0);
-                    }
-                },
-                .flip_three_end => {
-                    // FlipThrees nest (a FlipThree drawn during one targets
-                    // someone else), so starts and ends pair up like a stack.
-                    _ = app_state.flip_three_stack.pop();
-                    _ = app_state.animation.queue.orderedRemove(0);
-                },
+        updateFloatingTexts(frames);
+
+        const queue = &app_state.animation.queue;
+        if (queue.items.len == 0) try syncShown();
+        if (queue.items.len > 0) {
+            const animation = &queue.items[0];
+            if (!animation.started) {
+                animation.started = true;
+                try startAnimation(animation);
+            }
+            animation.t += animation.speed() * frames;
+            if (animation.t >= 1.0) {
+                try finishAnimation(animation);
+                _ = queue.orderedRemove(0);
             }
             return;
         }
@@ -537,42 +674,99 @@ pub const RiskStackApp = struct {
         }
         app_state.resetInputTracking();
 
+        // Once the winner is shown, the next step starts a new game.
+        if (app_state.simulation.result_ != null) {
+            try startNewGame();
+            return;
+        }
+
         const game_should_continue = try app_state.simulation.step();
+        // The last step's events (round over, winner) still need showing.
+        try queueEvents();
         if (!game_should_continue) {
             // Nothing left to show; don't wait for steps that can't happen.
             app_state.auto_steps = 0;
             const game_result = app_state.simulation.result();
             p.logInfo("game finished -> strategy {} won", .{game_result.winning_strategy});
-            return;
         }
+    }
 
-        if (app_state.simulation.events.items.len == 0) {
-            return;
-        }
+    /// Turns the simulation's new events into animations.
+    fn queueEvents() !void {
+        const all_events = app_state.simulation.events.items;
+        const events = all_events[@min(app_state.next_event_to_process_index, all_events.len)..];
+        app_state.next_event_to_process_index = all_events.len;
 
-        const events = app_state.simulation.events.items[app_state.next_event_to_process_index..];
-        app_state.next_event_to_process_index = app_state.simulation.events.items.len;
+        const queue = &app_state.animation.queue;
+        const gpa = app_state.allocator;
+        // Set by SecondChancePassed: the following DrawCard comes from this player.
+        var pass_source: ?*f.Player = null;
         for (events) |event| {
             switch (event) {
-                .DrawCard => |d| p.logInfo("{} DrawCard {} {any} {}", .{ app_state.simulation.events.items.len, d.card, d.player.hand.items, d.player.strategy }),
-                .PlayerEndRound => |d| p.logInfo("{} PlayerEndRound {any} {}", .{ app_state.simulation.events.items.len, d.player.hand.items, d.player.strategy }),
-                else => p.logInfo("{} {}", .{ app_state.simulation.events.items.len, event }),
+                .DrawCard => |d| p.logInfo("{} DrawCard {} {any} {}", .{ all_events.len, d.card, d.player.hand.items, d.player.strategy }),
+                .PlayerEndRound => |d| p.logInfo("{} PlayerEndRound {any} {}", .{ all_events.len, d.player.hand.items, d.player.strategy }),
+                else => p.logInfo("{} {}", .{ all_events.len, event }),
             }
 
             switch (event) {
                 .DrawCard => |data| {
-                    try app_state.animation.queue.append(app_state.allocator, .{ .deal_card = .{ .player = data.player, .card = data.card } });
+                    try queue.append(gpa, .{ .kind = .{ .deal_card = .{
+                        .player = data.player,
+                        .card = data.card,
+                        .source = pass_source,
+                        .to_front = data.card == .Freeze or data.card == .FlipThree,
+                    } } });
+                    pass_source = null;
                 },
                 .PlayerFrozen => |data| {
-                    try app_state.animation.queue.append(app_state.allocator, .{ .freeze_player = .{ .freezing_player = data.freezing_player, .frozen_player = data.frozen_player } });
+                    try queue.append(gpa, .{ .kind = .{ .freeze_player = .{ .freezing_player = data.freezing_player, .frozen_player = data.frozen_player, .score = data.score } } });
+                },
+                .PlayerEliminated => |data| {
+                    try queue.append(gpa, .{ .kind = .{ .player_result = .{ .player = data.player, .state = .Eliminated, .score = null, .outcome = .bust } } });
+                },
+                .PlayerEndRound => |data| {
+                    try queue.append(gpa, .{ .kind = .{ .player_result = .{ .player = data.player, .state = .RoundEnded, .score = data.score, .outcome = .stay } } });
+                },
+                .Flip7 => |data| {
+                    try queue.append(gpa, .{ .kind = .{ .banner = .{ .label = .init("FLIP 7! Player {d}", .{playerIndex(data.player) + 1}), .color = color_flip7 } } });
+                    try queue.append(gpa, .{ .kind = .{ .player_result = .{ .player = data.player, .state = .RoundEnded, .score = data.score, .outcome = .flip7 } } });
+                },
+                .PlayerWon => |data| {
+                    try queue.append(gpa, .{ .kind = .{ .won = .{ .player = data.player, .score = data.score } } });
+                },
+                .DeckShuffle => try queue.append(gpa, .{ .kind = .{ .shuffle = .{} } }),
+                .DeckExhausted => {
+                    try queue.append(gpa, .{ .kind = .{ .banner = .{ .label = .init("Deck exhausted", .{}), .color = color_info } } });
+                },
+                .RoundEnded => {
+                    try queue.append(gpa, .{ .kind = .{ .banner = .{ .label = .init("Round over", .{}), .color = color_info } } });
+                },
+                .NewRoundStarted => {
+                    try queue.append(gpa, .{ .kind = .collect_cards });
+                    try queue.append(gpa, .{ .kind = .{ .banner = .{ .label = .init("New round", .{}), .color = color_info } } });
                 },
                 .FlipThreeStarted => |data| {
-                    try app_state.animation.queue.append(app_state.allocator, .{ .flip_three_start = .{ .player = data.player, .target = data.target } });
+                    try queue.append(gpa, .{ .kind = .{ .flip_three_start = .{ .player = data.player, .target = data.target } } });
                 },
-                .FlipThreeEnded => {
-                    try app_state.animation.queue.append(app_state.allocator, .{ .flip_three_end = .{} });
+                .FlipThreeEnded => |data| {
+                    try queue.append(gpa, .{ .kind = .{ .flip_three_end = .{ .player = data.player, .target = data.target } } });
                 },
-                else => {},
+                .SecondChanceUsed => |data| {
+                    try queue.append(gpa, .{ .kind = .{ .discard = .{ .player = data.player, .cards = .{ .SecondChance, data.card }, .len = 2, .from_hand = true, .saved = true } } });
+                },
+                .SecondChancePassed => |data| {
+                    // Shown in front of the player who drew it, then handed on
+                    // by the DrawCard that follows.
+                    try queue.append(gpa, .{ .kind = .{ .deal_card = .{ .player = data.from, .card = .SecondChance, .to_front = true } } });
+                    pass_source = data.from;
+                },
+                .CardDiscarded => |data| {
+                    // A SecondChance nobody can take had no DrawCard yet; show it drawn first.
+                    if (data.card == .SecondChance) {
+                        try queue.append(gpa, .{ .kind = .{ .deal_card = .{ .player = data.player, .card = .SecondChance, .to_front = true } } });
+                    }
+                    try queue.append(gpa, .{ .kind = .{ .discard = .{ .player = data.player, .cards = .{ data.card, data.card }, .len = 1, .from_hand = false } } });
+                },
             }
         }
     }
@@ -650,276 +844,206 @@ pub const RiskStackApp = struct {
         const ortho = zm.orthographicOffCenterRh(-half_w, half_w, half_h, -half_h, -1.0, 1.0);
         p.glUniformMatrix4fv(app_state.gl.u_loc_projection, 1, p.GL_TRUE, zm.arrNPtr(&ortho));
 
-        // Card dimensions in world units.
-        const card_w: f32 = 0.12;
-        const card_h: f32 = 0.17;
-        const card_spacing: f32 = card_w * 1.1;
-
         var instances: std.ArrayList(Instance) = try .initCapacity(frame_allocator, 20);
         defer instances.deinit(frame_allocator);
-
-        const addCard = struct {
-            fn call(
-                alloc: std.mem.Allocator,
-                inst: *std.ArrayList(Instance),
-                cards: *CardTextures,
-                card_idx: usize,
-                cx: f32,
-                cy: f32,
-                angle: f32,
-                cw: f32,
-                ch: f32,
-            ) !void {
-                const cos_a = @cos(angle);
-                const sin_a = @sin(angle);
-                const m = zm.Mat{
-                    zm.f32x4(cos_a * cw, sin_a * cw, 0, 0),
-                    zm.f32x4(-sin_a * ch, cos_a * ch, 0, 0),
-                    zm.f32x4(0, 0, 1, 0),
-                    zm.f32x4(cx, cy, 0, 1),
-                };
-                const card_atlas_entry = &cards.card_atlas[card_idx];
-                const uv_rect = zm.f32x4(
-                    card_atlas_entry.top_left_u,
-                    card_atlas_entry.top_left_v,
-                    card_atlas_entry.bottom_right_u,
-                    card_atlas_entry.bottom_right_v,
-                );
-                try inst.append(alloc, .{
-                    .model = zm.transpose(m),
-                    .uv_rect = uv_rect,
-                    .color = zm.f32x4(0, 0, 0, 0),
-                    .render_type = 0,
-                });
-            }
-        }.call;
 
         if (app_state.scenario_runner) |*runner| if (runner.label()) |position| {
             const label = try std.fmt.allocPrint(frame_allocator, "{d}/{d} {s}", .{ position.number, position.total, position.name });
             try addText(frame_allocator, &instances, label, .{ .x = -half_w + 0.03 / app_state.zoom.current, .y = half_h - 0.07 / app_state.zoom.current, .scale = 0.05 / app_state.zoom.current });
         };
 
-        // Deck: single face-down card at the center.
-        try addCard(frame_allocator, &instances, &app_state.cards, back_texture_index, 0.0, 0.0, std.math.pi, card_w, card_h);
+        const shown = &app_state.shown;
+        const players = app_state.simulation.players;
+        const queue = app_state.animation.queue.items;
+        // The animation playing right now.
+        const current: ?*const Animation = if (queue.len > 0 and queue[0].started) &queue[0] else null;
+
+        // Deck and discard pile in the center, with their card counts above.
+        if (shown.deck_count > 0) {
+            try addCard(frame_allocator, &instances, back_texture_index, deck_pos, pile_angle);
+        } else {
+            try addQuad(frame_allocator, &instances, deck_pos[0], deck_pos[1], card_w, card_h, 0.0, zm.f32x4(1.0, 1.0, 1.0, 0.06));
+        }
+        if (shown.discard_top) |top| {
+            try addCard(frame_allocator, &instances, cardTextureIndex(top), discard_pos, pile_angle);
+        } else {
+            try addQuad(frame_allocator, &instances, discard_pos[0], discard_pos[1], card_w, card_h, 0.0, zm.f32x4(1.0, 1.0, 1.0, 0.06));
+        }
+        const count_scale = 0.035;
+        for ([_]struct { pos: [2]f32, count: usize }{
+            .{ .pos = deck_pos, .count = shown.deck_count },
+            .{ .pos = discard_pos, .count = shown.discard_count },
+        }) |pile| {
+            const label = try std.fmt.allocPrint(frame_allocator, "{d}", .{pile.count});
+            try addText(frame_allocator, &instances, label, .{
+                .x = pile.pos[0],
+                .y = pile.pos[1] + card_h / 2.0 + 0.015,
+                .offset_anchor_x = -0.5 * app_state.font.textDimensions(label, count_scale)[0],
+                .scale = count_scale,
+                .color = color_info,
+            });
+        }
+
+        // During `collect_cards` everything on the table moves to the discard pile.
+        const collect_t: f32 = if (current) |anim| (if (anim.kind == .collect_cards) smoothstep(anim.t) else 0.0) else 0.0;
 
         // Players arranged in a circle.
-        const num_players = app_state.simulation.players.len;
-        const radius: f32 = 0.5;
-        // Distance from the center for cards placed in front of a player.
-        const front_distance: f32 = radius - card_h * 1.2;
-        const text_radius: f32 = 0.7;
-        for (app_state.simulation.players, 0..) |*player, pi| {
-            // Spread players evenly; first player starts at the bottom.
-            const base_angle: f32 = -std.math.pi / 2.0 +
-                @as(f32, @floatFromInt(pi)) * (2.0 * std.math.pi / @as(f32, @floatFromInt(num_players)));
+        for (players, shown.players.items, 0..) |*player, *sp, pi| {
+            const seat = seatOf(players, player);
+            const hand_center = seat.handCenter();
+            const card_angle = seat.card_angle;
+            const perp = seat.perp();
 
-            const px: f32 = radius * @cos(base_angle);
-            const py: f32 = radius * @sin(base_angle);
-
-            // Cards face inward (toward the center).
-            var card_angle: f32 = base_angle + std.math.pi / 2.0;
-            if (py < 0.0) {
-                card_angle += std.math.pi;
-            }
-
-            // Perpendicular direction to spread cards in a row.
-            const perp_x: f32 = -@sin(base_angle);
-            const perp_y: f32 = @cos(base_angle);
-
-            const score = player.handScore();
-            const score_text = try std.fmt.allocPrint(frame_allocator, "{d} ({d})", .{ score, player.score });
-            defer frame_allocator.free(score_text);
-
+            const score_text = try std.fmt.allocPrint(frame_allocator, "P{d}: {d} ({d})", .{ pi + 1, f.scoreHand(sp.hand.items), sp.score });
             const font_scale = 0.05;
             const text_dimensions = app_state.font.textDimensions(score_text, font_scale);
-            const text_x: f32 = text_radius * @cos(base_angle);
-            const text_y: f32 = text_radius * @sin(base_angle);
-            var text_angle = base_angle + std.math.pi / 2.0;
-            if (py > 0.0) {
+            var text_angle = seat.base_angle + std.math.pi / 2.0;
+            if (@sin(seat.base_angle) > 0.0) {
                 text_angle += std.math.pi;
             }
             try addText(frame_allocator, &instances, score_text, .{
-                .x = text_x,
-                .y = text_y,
+                .x = text_radius * @cos(seat.base_angle),
+                .y = text_radius * @sin(seat.base_angle),
                 .offset_anchor_x = -0.5 * text_dimensions[0],
-                .offset_anchor_y = 0.0,
                 .angle = text_angle,
                 .scale = font_scale,
+                .color = switch (sp.state) {
+                    .InGame => color_text,
+                    .Frozen => color_frozen,
+                    .Eliminated => color_bust,
+                    .RoundEnded => color_stay,
+                },
             });
 
-            const shown = app_state.shown_hands.items[pi].items;
+            const shown_hand = sp.hand.items;
 
-            // The card being dealt to this player right now, if any. It flies
-            // into the slot after the shown cards.
-            var incoming: ?struct { card: f.Card, t: f32 } = null;
-            if (app_state.animation.queue.items.len > 0) switch (app_state.animation.queue.items[0]) {
-                .deal_card => |data| {
-                    if (data.player == player and data.card != .Freeze and data.card != .FlipThree) {
-                        incoming = .{ .card = data.card, .t = data.t };
-                    }
-                },
-                else => {},
-            };
-            const n = shown.len + @intFromBool(incoming != null);
+            // The card being dealt into this player's hand right now, if any.
+            // It flies into the slot after the shown cards.
+            const incoming: ?f.Card = if (current) |anim| switch (anim.kind) {
+                .deal_card => |d| if (d.player == player and !d.to_front) d.card else null,
+                else => null,
+            } else null;
+            const n = shown_hand.len + @intFromBool(incoming != null);
 
             const tapped_spacing: f32 = card_h * 1.1;
-            const effective_spacing: f32 = if (player.state == .Eliminated) tapped_spacing else card_spacing;
+            const effective_spacing: f32 = if (sp.state == .Eliminated) tapped_spacing else card_spacing;
             const total_width: f32 = @as(f32, @floatFromInt(n -| 1)) * effective_spacing;
             for (0..n) |ci| {
-                const card = if (ci < shown.len) shown[ci] else incoming.?.card;
+                const card = if (ci < shown_hand.len) shown_hand[ci] else incoming.?;
 
-                var local_card_angle = card_angle;
+                var angle = card_angle;
                 const offset: f32 = -total_width / 2.0 + @as(f32, @floatFromInt(ci)) * effective_spacing;
-                var cx = px + perp_x * offset;
-                var cy = py + perp_y * offset;
+                var pos = [2]f32{ hand_center[0] + perp[0] * offset, hand_center[1] + perp[1] * offset };
 
-                if (ci == shown.len) {
-                    const t_deal = incoming.?.t;
-                    const result_pos = zm.lerp(zm.f32x4(0.0, 0.0, 0.0, 0.0), zm.f32x4(cx, cy, 0.0, 0.0), t_deal);
-                    cx = result_pos[0];
-                    cy = result_pos[1];
-
-                    var start_angle: f32 = 0.0;
-                    if (local_card_angle > std.math.pi) {
-                        start_angle = std.math.pi * 2.0;
-                    }
-                    local_card_angle = std.math.lerp(start_angle, local_card_angle, t_deal);
+                if (sp.state == .RoundEnded and ci == 0) {
+                    angle += std.math.pi / 2.0;
+                    pos[0] -= perp[0] * (card_w / 2.0);
+                    pos[1] -= perp[1] * (card_w / 2.0);
+                }
+                if (sp.state == .Eliminated) {
+                    angle += std.math.pi / 2.0;
                 }
 
-                if (player.state == .RoundEnded and ci == 0) {
-                    local_card_angle += std.math.pi / 2.0;
-                    cx -= perp_x * (card_w / 2.0);
-                    cy -= perp_y * (card_w / 2.0);
+                if (ci == shown_hand.len) {
+                    const anim = current.?;
+                    const amount = smoothstep(anim.t);
+                    pos = lerp2(anim.from, pos, amount);
+                    angle = lerpAngle(anim.from_angle, angle, amount);
                 }
 
-                if (player.state == .Eliminated) {
-                    local_card_angle += std.math.pi / 2.0;
-                }
-
-                try addCard(frame_allocator, &instances, &app_state.cards, cardTextureIndex(card), cx, cy, local_card_angle, card_w, card_h);
+                try addCard(frame_allocator, &instances, cardTextureIndex(card), lerp2(pos, discard_pos, collect_t), lerpAngle(angle, pile_angle, collect_t));
             }
 
-            // render drawing flipthree/freeze card animation
-            for (app_state.animation.queue.items) |animation| {
-                switch (animation) {
-                    .deal_card => |data| {
-                        if (data.card != .Freeze and data.card != .FlipThree) continue;
-                        if (data.player != player) continue;
-
-                        var local_card_angle = card_angle;
-                        // animate to the center of the players hand
-                        // const offset: f32 = -total_width / 2.0 + @as(f32, @floatFromInt(0)) * card_spacing;
-                        // var cx = px + perp_x * offset;
-                        // var cy = py + perp_y * offset;
-
-                        // FlipThree lands in front of the player, where its flight to the target starts.
-                        const dst = if (data.card == .FlipThree) frontOf(seatOf(app_state.simulation.players, player), front_distance) else .{ px, py };
-                        const result_pos = zm.lerp(zm.f32x4(0.0, 0.0, 0.0, 0.0), zm.f32x4(dst[0], dst[1], 0.0, 0.0), data.t);
-                        const cx = result_pos[0];
-                        const cy = result_pos[1];
-
-                        var start_angle: f32 = 0.0;
-                        if (local_card_angle > std.math.pi) {
-                            start_angle = std.math.pi * 2.0;
-                        }
-                        local_card_angle = std.math.lerp(start_angle, local_card_angle, data.t);
-
-                        try addCard(frame_allocator, &instances, &app_state.cards, cardTextureIndex(data.card), cx, cy, local_card_angle, card_w, card_h);
-                    },
-                    else => {},
-                }
-                break;
+            // A frozen player's hand is covered by the Freeze card.
+            if (sp.state == .Frozen) {
+                try addCard(frame_allocator, &instances, cardTextureIndex(.Freeze), lerp2(hand_center, discard_pos, collect_t), lerpAngle(card_angle + std.math.pi / 2.0, pile_angle, collect_t));
             }
 
-            // render freeze card in front of player if they are frozen
-            // but not while a freeze animation targeting this player is still pending
-            const freeze_anim_pending = for (app_state.animation.queue.items) |anim| {
-                if (anim == .freeze_player and anim.freeze_player.frozen_player == player) break true;
-            } else false;
-            if (player.state == .Frozen and !freeze_anim_pending) {
-                const freeze_card_idx = cardTextureIndex(.Freeze);
-                const freeze_card_angle = card_angle + std.math.pi / 2.0;
-                const freeze_card_cx = px;
-                const freeze_card_cy = py;
-                try addCard(frame_allocator, &instances, &app_state.cards, freeze_card_idx, freeze_card_cx, freeze_card_cy, freeze_card_angle, card_w, card_h);
+            // Drawn action cards waiting in front of the player.
+            for (sp.pending.items, 0..) |card, i| {
+                try addCard(frame_allocator, &instances, cardTextureIndex(card), seat.pendingSlot(i), card_angle);
             }
 
             // FlipThree cards targeting this player stay in front of them until FlipThreeEnded.
-            var stacked: f32 = 0.0;
+            var stacked: usize = 0;
             for (app_state.flip_three_stack.items) |entry| {
                 if (entry.target != player) continue;
-                const pos = frontOf(seatOf(app_state.simulation.players, player), front_distance);
-                const shift = stacked * card_w * 0.3;
-                try addCard(frame_allocator, &instances, &app_state.cards, cardTextureIndex(.FlipThree), pos[0] + perp_x * shift, pos[1] + perp_y * shift, card_angle, card_w, card_h);
-                stacked += 1.0;
+                try addCard(frame_allocator, &instances, cardTextureIndex(.FlipThree), seat.flipThreeSlot(stacked), card_angle);
+                stacked += 1;
             }
         }
 
-        // Render the FlipThree card flying from the player who drew it to its target.
-        if (app_state.animation.queue.items.len > 0) switch (app_state.animation.queue.items[0]) {
-            .flip_three_start => |data| {
-                const src = seatOf(app_state.simulation.players, data.player);
-                const dst = seatOf(app_state.simulation.players, data.target);
-                const src_pos = frontOf(src, front_distance);
-                const dst_pos = frontOf(dst, front_distance);
-                try addCard(
-                    frame_allocator,
-                    &instances,
-                    &app_state.cards,
-                    cardTextureIndex(.FlipThree),
-                    std.math.lerp(src_pos[0], dst_pos[0], data.t),
-                    std.math.lerp(src_pos[1], dst_pos[1], data.t),
-                    lerpAngle(src.card_angle, dst.card_angle, data.t),
-                    card_w,
-                    card_h,
-                );
-            },
-            else => {},
-        };
-
-        // Render the freeze card flying from freezing player to frozen player.
-        for (app_state.animation.queue.items) |animation| {
-            switch (animation) {
-                .freeze_player => |data| {
-                    // Helper: compute a player's base_angle and derived card_angle.
-                    const playerAngles = struct {
-                        fn call(players: []f.Player, target: *f.Player) struct { base: f32, card: f32 } {
-                            const np = players.len;
-                            for (players, 0..) |*pl, idx| {
-                                if (pl == target) {
-                                    const base: f32 = -std.math.pi / 2.0 +
-                                        @as(f32, @floatFromInt(idx)) * (2.0 * std.math.pi / @as(f32, @floatFromInt(np)));
-                                    var card = base + std.math.pi / 2.0;
-                                    if (radius * @sin(base) < 0.0) card += std.math.pi;
-                                    return .{ .base = base, .card = card };
-                                }
-                            }
-                            return .{ .base = 0.0, .card = 0.0 };
-                        }
-                    }.call;
-
-                    const freezing_angles = playerAngles(app_state.simulation.players, data.freezing_player);
-                    const frozen_angles = playerAngles(app_state.simulation.players, data.frozen_player);
-
-                    const src_x = radius * @cos(freezing_angles.base);
-                    const src_y = radius * @sin(freezing_angles.base);
-                    const dst_x = radius * @cos(frozen_angles.base);
-                    const dst_y = radius * @sin(frozen_angles.base);
-
-                    const cx = std.math.lerp(src_x, dst_x, data.t);
-                    const cy = std.math.lerp(src_y, dst_y, data.t);
-
-                    // Source angle: normal card orientation of the freezing player.
-                    // Destination angle: tapped (freeze) card orientation of the frozen player.
-                    const src_angle = freezing_angles.card;
-                    const dst_angle = frozen_angles.card + std.math.pi / 2.0;
-                    const freeze_anim_angle = std.math.lerp(src_angle, dst_angle, data.t);
-
-                    try addCard(frame_allocator, &instances, &app_state.cards, cardTextureIndex(.Freeze), cx, cy, freeze_anim_angle, card_w, card_h);
+        // The card(s) moved by the current animation, outside of a hand.
+        if (current) |anim| {
+            const amount = smoothstep(anim.t);
+            switch (anim.kind) {
+                .deal_card => |d| if (d.to_front) {
+                    const seat = seatOf(players, d.player);
+                    const dst = seat.pendingSlot(shownPlayer(d.player).pending.items.len);
+                    try addCard(frame_allocator, &instances, cardTextureIndex(d.card), lerp2(anim.from, dst, amount), lerpAngle(anim.from_angle, seat.card_angle, amount));
                 },
-                else => {},
+                .freeze_player => |d| {
+                    // Lands tapped on the frozen player's hand.
+                    const seat = seatOf(players, d.frozen_player);
+                    try addCard(frame_allocator, &instances, cardTextureIndex(.Freeze), lerp2(anim.from, seat.handCenter(), amount), lerpAngle(anim.from_angle, seat.card_angle + std.math.pi / 2.0, amount));
+                },
+                .flip_three_start => |d| {
+                    const seat = seatOf(players, d.target);
+                    var stacked: usize = 0;
+                    for (app_state.flip_three_stack.items) |entry| stacked += @intFromBool(entry.target == d.target);
+                    try addCard(frame_allocator, &instances, cardTextureIndex(.FlipThree), lerp2(anim.from, seat.flipThreeSlot(stacked), amount), lerpAngle(anim.from_angle, seat.card_angle, amount));
+                },
+                .flip_three_end => {
+                    try addCard(frame_allocator, &instances, cardTextureIndex(.FlipThree), lerp2(anim.from, discard_pos, amount), lerpAngle(anim.from_angle, pile_angle, amount));
+                },
+                .discard => |d| for (d.cards[0..d.len], 0..) |card, i| {
+                    const fi: f32 = @floatFromInt(i);
+                    const from = [2]f32{ anim.from[0] + fi * card_w * 0.4, anim.from[1] };
+                    try addCard(frame_allocator, &instances, cardTextureIndex(card), lerp2(from, discard_pos, amount), lerpAngle(anim.from_angle, pile_angle, amount));
+                },
+                .shuffle => |d| {
+                    // A few face-down cards hop from the discard pile onto the deck.
+                    const shown_cards = @min(d.cards, 6);
+                    for (0..shown_cards) |i| {
+                        const fi: f32 = @floatFromInt(i);
+                        const local_t = smoothstep(std.math.clamp(anim.t * 1.6 - fi * 0.12, 0.0, 1.0));
+                        var pos = lerp2(discard_pos, deck_pos, local_t);
+                        const hop = @sin(std.math.pi * local_t);
+                        pos[1] += hop * card_h * 0.6;
+                        const wiggle: f32 = if (i % 2 == 0) 0.5 else -0.5;
+                        try addCard(frame_allocator, &instances, back_texture_index, pos, pile_angle + hop * wiggle);
+                    }
+                },
+                .banner => |d| try addBanner(frame_allocator, &instances, d.label.slice(), d.color, fadeInOut(anim.t), 0.0, 0.09),
+                .won => |d| {
+                    const label = Label.init("Player {d} wins!", .{playerIndex(d.player) + 1});
+                    try addBanner(frame_allocator, &instances, label.slice(), color_flip7, @min(1.0, anim.t * 4.0), 0.0, 0.09 * (0.6 + 0.4 * smoothstep(@min(1.0, anim.t * 2.0))));
+                },
+                .player_result, .collect_cards => {},
             }
-            break;
+        }
+
+        // Outcomes rising above the players.
+        for (app_state.floating_texts.items) |floating| {
+            const center = seatOf(players, floating.player).handCenter();
+            const scale = 0.06;
+            const label = floating.label.slice();
+            var color = floating.color;
+            color[3] = 1.0 - floating.t * floating.t;
+            try addText(frame_allocator, &instances, label, .{
+                .x = center[0],
+                .y = center[1] + card_h * 0.6 + 0.1 * floating.t,
+                .offset_anchor_x = -0.5 * app_state.font.textDimensions(label, scale)[0],
+                .scale = scale,
+                .color = color,
+            });
+        }
+
+        if (shown.winner) |winner| {
+            const title = Label.init("Player {d} wins with {d} points!", .{ winner.index + 1, winner.score });
+            try addBanner(frame_allocator, &instances, title.slice(), color_flip7, 1.0, 0.0, 0.07);
+            const strategy = strategyLabel(players[winner.index].strategy);
+            try addBanner(frame_allocator, &instances, strategy.slice(), color_info, 1.0, -0.1, 0.045);
         }
 
         p.glActiveTexture(p.GL_TEXTURE0);
@@ -953,15 +1077,37 @@ pub const RiskStackApp = struct {
         const s = try p.readStorage(app_state.io, app_state.allocator, app_state.scenario_path);
         defer app_state.allocator.free(s);
         try app_state.simulation.load(s);
+        try resetShown();
+        p.logInfo("loaded scenario from {s}", .{app_state.scenario_path});
+    }
 
+    /// Replaces the finished game with a new one: same players and
+    /// strategies, scores at zero, a fresh shuffled deck.
+    fn startNewGame() !void {
+        const old = &app_state.simulation;
+        const strategies = try app_state.allocator.alloc(f.DrawStrategy, old.players.len);
+        defer app_state.allocator.free(strategies);
+        for (strategies, old.players) |*strategy, player| strategy.* = player.strategy;
+
+        // Build the new game before dropping the old one, so a failure keeps it.
+        var new_game = try f.GameSimulation.init(app_state.allocator, &app_state.prng, strategies);
+        new_game.settings = old.settings;
+        old.deinit();
+        app_state.simulation = new_game;
+        try resetShown();
+        p.logInfo("started a new game", .{});
+    }
+
+    /// Shows the simulation as it is after it was replaced or reloaded.
+    fn resetShown() !void {
         // Pending animations point at the replaced players.
         app_state.animation.queue.clearRetainingCapacity();
         app_state.flip_three_stack.clearRetainingCapacity();
-        try syncShownHands();
+        app_state.floating_texts.clearRetainingCapacity();
+        app_state.shown.winner = null;
+        try syncShown();
         app_state.next_event_to_process_index = 0;
-        // A click or Space from before the load must not advance the new state.
         app_state.should_run_next_step = false;
-        p.logInfo("loaded scenario from {s}", .{app_state.scenario_path});
     }
 };
 
@@ -1069,6 +1215,8 @@ const ScenarioRunner = struct {
 };
 
 test "ScenarioRunner.advance holds each scenario, then plays the next" {
+    const t = std.testing;
+
     var scenarios = [_]ScenarioRunner.Scenario{
         .{ .name = "a", .path = "a.json", .steps = 1 },
         .{ .name = "b", .path = "b.json", .steps = 2 },
@@ -1101,19 +1249,166 @@ fn playerIndex(player: *const f.Player) usize {
     unreachable;
 }
 
-/// Makes every shown hand match the player's real hand.
-fn syncShownHands() !void {
+fn shownPlayer(player: *const f.Player) *ShownPlayer {
+    return &app_state.shown.players.items[playerIndex(player)];
+}
+
+/// Makes the shown table match the simulation.
+fn syncShown() !void {
     const players = app_state.simulation.players;
-    const hands = &app_state.shown_hands;
-    while (hands.items.len > players.len) {
-        var hand = hands.pop().?;
-        hand.deinit(app_state.allocator);
+    const shown = &app_state.shown;
+    while (shown.players.items.len > players.len) {
+        var sp = shown.players.pop().?;
+        sp.deinit(app_state.allocator);
     }
-    while (hands.items.len < players.len) try hands.append(app_state.allocator, .empty);
-    for (hands.items, players) |*shown, player| {
-        shown.clearRetainingCapacity();
-        try shown.appendSlice(app_state.allocator, player.hand.items);
+    while (shown.players.items.len < players.len) try shown.players.append(app_state.allocator, .{});
+    for (shown.players.items, players) |*sp, player| {
+        sp.hand.clearRetainingCapacity();
+        try sp.hand.appendSlice(app_state.allocator, player.hand.items);
+        sp.pending.clearRetainingCapacity();
+        sp.state = player.state;
+        sp.score = player.score;
     }
+    const deck = &app_state.simulation.deck;
+    shown.deck_count = deck.cards.items.len;
+    shown.discard_count = deck.discarded.items.len;
+    shown.discard_top = if (deck.discarded.items.len > 0) deck.discarded.items[deck.discarded.items.len - 1] else null;
+    app_state.flip_three_stack.clearRetainingCapacity();
+}
+
+/// Removes the last `card` from `cards` and returns its index.
+fn removeLast(cards: *std.ArrayList(f.Card), card: f.Card) ?usize {
+    const index = std.mem.lastIndexOfScalar(f.Card, cards.items, card) orelse return null;
+    _ = cards.orderedRemove(index);
+    return index;
+}
+
+/// Takes `card` from in front of `player`; `animation` starts where it lay.
+fn takePending(animation: *Animation, player: *const f.Player, card: f.Card) void {
+    const seat = seatOf(app_state.simulation.players, player);
+    const index = removeLast(&shownPlayer(player).pending, card) orelse 0;
+    animation.from = seat.pendingSlot(index);
+    animation.from_angle = seat.card_angle;
+}
+
+/// Applies what an animation changes on the table when it begins.
+fn startAnimation(animation: *Animation) !void {
+    const players = app_state.simulation.players;
+    const shown = &app_state.shown;
+    switch (animation.kind) {
+        .deal_card => |d| {
+            if (d.source) |source| {
+                takePending(animation, source, d.card);
+            } else {
+                animation.from = deck_pos;
+                animation.from_angle = pile_angle;
+                shown.deck_count -|= 1;
+            }
+        },
+        .freeze_player => |d| takePending(animation, d.freezing_player, .Freeze),
+        .flip_three_start => |d| takePending(animation, d.player, .FlipThree),
+        .flip_three_end => |d| {
+            // The FlipThree on top of the target's stack leaves.
+            var stacked: usize = 0;
+            for (app_state.flip_three_stack.items) |entry| stacked += @intFromBool(entry.target == d.target);
+            const seat = seatOf(players, d.target);
+            animation.from = seat.flipThreeSlot(stacked -| 1);
+            animation.from_angle = seat.card_angle;
+            _ = app_state.flip_three_stack.pop();
+        },
+        .discard => |d| {
+            const seat = seatOf(players, d.player);
+            const sp = shownPlayer(d.player);
+            animation.from = seat.handCenter();
+            animation.from_angle = seat.card_angle;
+            for (d.cards[0..d.len]) |card| {
+                if (d.from_hand) {
+                    _ = removeLast(&sp.hand, card);
+                } else if (removeLast(&sp.pending, card)) |index| {
+                    animation.from = seat.pendingSlot(index);
+                }
+            }
+            if (d.saved) try spawnFloatingText(d.player, .init("Saved!", .{}), color_saved);
+        },
+        .player_result => |d| {
+            const sp = shownPlayer(d.player);
+            const gain = if (d.score) |score| score -| sp.score else 0;
+            sp.state = d.state;
+            if (d.score) |score| sp.score = score;
+            switch (d.outcome) {
+                .bust => try spawnFloatingText(d.player, .init("Bust!", .{}), color_bust),
+                .stay => try spawnFloatingText(d.player, .init("Stay +{d}", .{gain}), color_stay),
+                .flip7 => try spawnFloatingText(d.player, .init("Flip 7! +{d}", .{gain}), color_flip7),
+            }
+        },
+        .shuffle => |*d| {
+            d.cards = shown.discard_count;
+            shown.discard_count = 0;
+            shown.discard_top = null;
+        },
+        .collect_cards, .banner, .won => {},
+    }
+}
+
+/// Applies what an animation changes on the table when it ends.
+fn finishAnimation(animation: *const Animation) !void {
+    const gpa = app_state.allocator;
+    const shown = &app_state.shown;
+    switch (animation.kind) {
+        .deal_card => |d| {
+            const sp = shownPlayer(d.player);
+            try (if (d.to_front) &sp.pending else &sp.hand).append(gpa, d.card);
+        },
+        .freeze_player => |d| {
+            const sp = shownPlayer(d.frozen_player);
+            const gain = d.score -| sp.score;
+            sp.state = .Frozen;
+            sp.score = d.score;
+            shown.discard(.Freeze);
+            try spawnFloatingText(d.frozen_player, .init("Frozen +{d}", .{gain}), color_frozen);
+        },
+        .flip_three_start => |d| try app_state.flip_three_stack.append(gpa, .{ .player = d.player, .target = d.target }),
+        .flip_three_end => shown.discard(.FlipThree),
+        .discard => |d| for (d.cards[0..d.len]) |card| shown.discard(card),
+        .shuffle => |d| shown.deck_count += d.cards,
+        .collect_cards => for (shown.players.items) |*sp| {
+            for (sp.hand.items) |card| shown.discard(card);
+            sp.hand.clearRetainingCapacity();
+            sp.pending.clearRetainingCapacity();
+            sp.state = .InGame;
+        },
+        .won => |d| shown.winner = .{ .index = playerIndex(d.player), .score = d.score },
+        .player_result, .banner => {},
+    }
+}
+
+fn spawnFloatingText(player: *f.Player, label: Label, color: zm.Vec) !void {
+    try app_state.floating_texts.append(app_state.allocator, .{ .player = player, .label = label, .color = color });
+}
+
+fn updateFloatingTexts(frames: f32) void {
+    const texts = &app_state.floating_texts;
+    var i: usize = 0;
+    while (i < texts.items.len) {
+        texts.items[i].t += 0.012 * frames;
+        if (texts.items[i].t >= 1.0) {
+            _ = texts.orderedRemove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+fn strategyLabel(strategy: f.DrawStrategy) Label {
+    return switch (strategy) {
+        .MinPoints => |v| .init("Strategy: min {d} points", .{v}),
+        .MaxCards => |v| .init("Strategy: max {d} cards", .{v}),
+        .MinPointsMaxCards => |v| .init("Strategy: min {d} points, max {d} cards", .{ v.min_points, v.max_cards }),
+        .Always7 => .init("Strategy: always 7", .{}),
+        .Random => .init("Strategy: random", .{}),
+        .RandomMinCards => |v| .init("Strategy: random, min {d} cards", .{v}),
+        .ChanceOfFailureBelow => |v| .init("Strategy: risk below {d:.2}", .{v}),
+    };
 }
 
 /// Where a player sits at the table, matching the layout in `render`.
@@ -1122,6 +1417,32 @@ const Seat = struct {
     base_angle: f32,
     /// Orientation of the player's cards, facing the center.
     card_angle: f32,
+
+    fn handCenter(self: Seat) [2]f32 {
+        return frontOf(self, table_radius);
+    }
+
+    /// Direction along which the hand is spread.
+    fn perp(self: Seat) [2]f32 {
+        return .{ -@sin(self.base_angle), @cos(self.base_angle) };
+    }
+
+    /// Where the `index`th FlipThree aimed at this player lies.
+    fn flipThreeSlot(self: Seat, index: usize) [2]f32 {
+        const front = frontOf(self, front_distance);
+        const shift = @as(f32, @floatFromInt(index)) * card_w * 0.3;
+        const dir = self.perp();
+        return .{ front[0] + dir[0] * shift, front[1] + dir[1] * shift };
+    }
+
+    /// Where the `index`th unresolved card in front of the player lies,
+    /// beside their FlipThree stack.
+    fn pendingSlot(self: Seat, index: usize) [2]f32 {
+        const front = frontOf(self, front_distance);
+        const shift = -@as(f32, @floatFromInt(index + 1)) * card_w * 1.15;
+        const dir = self.perp();
+        return .{ front[0] + dir[0] * shift, front[1] + dir[1] * shift };
+    }
 };
 
 fn seatOf(players: []const f.Player, player: *const f.Player) Seat {
@@ -1141,12 +1462,27 @@ fn frontOf(seat: Seat, distance: f32) [2]f32 {
 }
 
 /// Interpolates between two angles along the shorter way around.
-fn lerpAngle(a: f32, b: f32, amount: f32) f32 {
+fn lerpAngle(a: f32, b: f32, t: f32) f32 {
     const diff = @mod(b - a + std.math.pi, 2.0 * std.math.pi) - std.math.pi;
-    return a + diff * amount;
+    return a + diff * t;
+}
+
+fn lerp2(a: [2]f32, b: [2]f32, t: f32) [2]f32 {
+    return .{ std.math.lerp(a[0], b[0], t), std.math.lerp(a[1], b[1], t) };
+}
+
+/// Eases `t` in [0, 1] in and out.
+fn smoothstep(t: f32) f32 {
+    return t * t * (3.0 - 2.0 * t);
+}
+
+/// Opacity that fades in at the start of `t` in [0, 1] and out at the end.
+fn fadeInOut(t: f32) f32 {
+    return std.math.clamp(@min(t, 1.0 - t) * 6.0, 0.0, 1.0);
 }
 
 test "lerpAngle takes the shorter way around" {
+    const t = std.testing;
     try t.expectApproxEqAbs(@as(f32, 0.0), lerpAngle(0.0, 2.0 * std.math.pi, 0.5), 1e-5);
     try t.expectApproxEqAbs(@as(f32, -0.25), lerpAngle(0.0, -0.5, 0.5), 1e-5);
     // From just above 0 to just below 2π: backwards through 0, not forwards around.
@@ -1160,6 +1496,8 @@ const TextParameters = struct {
     offset_anchor_y: f32 = 0.0,
     angle: f32 = 0.0,
     scale: f32 = 1.0,
+    /// Alpha fades the text.
+    color: zm.Vec = color_text,
 };
 
 fn addText(
@@ -1180,7 +1518,7 @@ fn addText(
         try inst.append(alloc, .{
             .model = zm.transpose(model_matrix),
             .uv_rect = item.uv_rect,
-            .color = zm.f32x4(0, 1.0, 1.0, 1.0),
+            .color = text_params.color,
             .render_type = 1,
         });
     }
@@ -1311,6 +1649,40 @@ fn addQuad(alloc: std.mem.Allocator, inst: *std.ArrayList(Instance), cx: f32, cy
         .uv_rect = zm.f32x4(0, 0, 0, 0),
         .color = color,
         .render_type = 2,
+    });
+}
+
+/// Card `card_idx` from the atlas, centered at `pos`.
+fn addCard(alloc: std.mem.Allocator, inst: *std.ArrayList(Instance), card_idx: usize, pos: [2]f32, angle: f32) !void {
+    const cos_a = @cos(angle);
+    const sin_a = @sin(angle);
+    const m = zm.Mat{
+        zm.f32x4(cos_a * card_w, sin_a * card_w, 0, 0),
+        zm.f32x4(-sin_a * card_h, cos_a * card_h, 0, 0),
+        zm.f32x4(0, 0, 1, 0),
+        zm.f32x4(pos[0], pos[1], 0, 1),
+    };
+    const entry = &app_state.cards.card_atlas[card_idx];
+    try inst.append(alloc, .{
+        .model = zm.transpose(m),
+        .uv_rect = zm.f32x4(entry.top_left_u, entry.top_left_v, entry.bottom_right_u, entry.bottom_right_v),
+        .color = zm.f32x4(0, 0, 0, 0),
+        .render_type = 0,
+    });
+}
+
+/// Text centered horizontally at height `y` on a dark backdrop.
+fn addBanner(alloc: std.mem.Allocator, inst: *std.ArrayList(Instance), txt: []const u8, color: zm.Vec, alpha: f32, y: f32, scale: f32) !void {
+    const width = app_state.font.textDimensions(txt, scale)[0];
+    try addQuad(alloc, inst, 0.0, y, width + scale * 1.2, scale * 1.6, 0.0, zm.f32x4(0.05, 0.05, 0.05, 0.85 * alpha));
+    var text_color = color;
+    text_color[3] = alpha;
+    try addText(alloc, inst, txt, .{
+        .y = y,
+        .offset_anchor_x = -0.5 * width,
+        .offset_anchor_y = -0.35 * scale,
+        .scale = scale,
+        .color = text_color,
     });
 }
 
