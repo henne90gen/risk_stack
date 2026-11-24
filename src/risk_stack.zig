@@ -232,6 +232,46 @@ pub const DrawStrategy = union(enum) {
     };
 };
 
+/// Points `hand` is worth if banked now.
+pub fn scoreHand(hand: []const Card) u32 {
+    var number_sum: u32 = 0;
+    var modifier_sum: u32 = 0;
+    var number_cards: u32 = 0;
+    var multiply_by_2: bool = false;
+
+    for (hand) |c| {
+        switch (c) {
+            .Zero, .One, .Two, .Three, .Four, .Five, .Six, .Seven, .Eight, .Nine, .Ten, .Eleven, .Twelve => {
+                number_sum += @intFromEnum(c);
+                number_cards += 1;
+            },
+            .PlusTwo, .PlusFour, .PlusSix, .PlusEight, .PlusTen => {
+                const modifier = (@intFromEnum(c) - @intFromEnum(Card.PlusTwo) + 1) * 2;
+                modifier_sum += modifier;
+            },
+            .TimesTwo => {
+                multiply_by_2 = true;
+            },
+            .SecondChance => {},
+            .Freeze, .FlipThree => {
+                @panic("special cards Freeze and FlipThree are not supposed to be held by players");
+            },
+        }
+    }
+
+    // x2 doubles only the number cards, not the +N cards or the Flip 7 bonus.
+    if (multiply_by_2) {
+        number_sum *= 2;
+    }
+
+    var score = number_sum + modifier_sum;
+    if (number_cards == 7) {
+        score += 15;
+    }
+
+    return score;
+}
+
 pub const PlayerState = enum {
     InGame,
     Frozen,
@@ -255,42 +295,7 @@ pub const Player = struct {
     }
 
     pub fn handScore(self: *const Player) u32 {
-        var number_sum: u32 = 0;
-        var modifier_sum: u32 = 0;
-        var number_cards: u32 = 0;
-        var multiply_by_2: bool = false;
-
-        for (self.hand.items) |c| {
-            switch (c) {
-                .Zero, .One, .Two, .Three, .Four, .Five, .Six, .Seven, .Eight, .Nine, .Ten, .Eleven, .Twelve => {
-                    number_sum += @intFromEnum(c);
-                    number_cards += 1;
-                },
-                .PlusTwo, .PlusFour, .PlusSix, .PlusEight, .PlusTen => {
-                    const modifier = (@intFromEnum(c) - @intFromEnum(Card.PlusTwo) + 1) * 2;
-                    modifier_sum += modifier;
-                },
-                .TimesTwo => {
-                    multiply_by_2 = true;
-                },
-                .SecondChance => {},
-                .Freeze, .FlipThree => {
-                    @panic("special cards Freeze and FlipThree are not supposed to be held by players");
-                },
-            }
-        }
-
-        // x2 doubles only the number cards, not the +N cards or the Flip 7 bonus.
-        if (multiply_by_2) {
-            number_sum *= 2;
-        }
-
-        var score = number_sum + modifier_sum;
-        if (number_cards == 7) {
-            score += 15;
-        }
-
-        return score;
+        return scoreHand(self.hand.items);
     }
 
     pub fn numberCardCount(self: *const Player) u32 {
